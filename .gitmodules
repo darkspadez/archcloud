@@ -1,0 +1,3 @@
+[submodule "refs/archiso"]
+	path = refs/archiso
+	url = https://gitlab.archlinux.org/archlinux/archiso.git

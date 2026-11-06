@@ -1,0 +1,41 @@
+# /etc/zsh/zshrc — installed by arch-server-bootstrap (archcloud).
+# System-wide interactive config for root and every user. zsh reads this file
+# before ~/.zshrc, so personal tweaks and MODERN_CLI_* toggles go there... except
+# the toggles must be set *before* modern-cli.zsh loads: put them in ~/.zshenv.
+
+# --- terminfo fallback for new terminals (Ghostty, Kitty, WezTerm) over SSH ---
+# If this host has no terminfo entry for the client's TERM, line editing and
+# TUIs misbehave (backspace artifacts, broken keys). Fall back to a safe TERM.
+if ! infocmp "$TERM" >/dev/null 2>&1; then
+  export TERM=xterm-256color
+fi
+
+# --- history + interactive defaults ---
+HISTFILE=${HISTFILE:-$HOME/.zsh_history}
+HISTSIZE=50000
+SAVEHIST=50000
+setopt hist_ignore_dups hist_ignore_space share_history extended_history
+setopt interactive_comments auto_cd no_beep
+bindkey -e
+# Home/End/Delete on the usual terminals
+bindkey '^[[H' beginning-of-line; bindkey '^[[F' end-of-line; bindkey '^[[3~' delete-char
+bindkey '^[[1~' beginning-of-line; bindkey '^[[4~' end-of-line
+
+# --- PATH extras ---
+command -v go >/dev/null 2>&1 && path+=("${GOPATH:-$HOME/go}/bin")
+[[ -d $HOME/.local/bin ]] && path=("$HOME/.local/bin" $path)
+typeset -U path
+
+# --- a few plain conveniences (the wrappers below cover the rest) ---
+alias free='free -h'
+alias ip='ip -color=auto'
+
+# --- Pure prompt (zsh-native, minimal; cloned to /usr/share/zsh/pure) ---
+if [[ -d /usr/share/zsh/pure ]]; then
+  fpath+=(/usr/share/zsh/pure)
+  autoload -U promptinit && promptinit
+  prompt pure
+fi
+
+# --- modern CLI wrappers, completion, fzf/atuin/zoxide, plugins (must stay last) ---
+[[ -r /etc/zsh/modern-cli.zsh ]] && source /etc/zsh/modern-cli.zsh

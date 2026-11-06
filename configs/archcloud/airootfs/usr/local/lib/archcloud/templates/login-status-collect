@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# login-status-collect — installed by arch-server-bootstrap (archcloud); ported
+# from fedora-cli-setup.sh to pacman.
+# Runs as root from login-status-collect.timer; writes /var/cache/login-status/status.env
+# Usage: login-status-collect [--updates]   (--updates forces a checkupdates run now)
+set -uo pipefail
+CACHE_DIR=/var/cache/login-status
+OUT=$CACHE_DIR/status.env
+CONF=/etc/login-status.conf
+UPDATE_INTERVAL=14400   # seconds between checkupdates runs (a pacman transaction also triggers one)
+BACKUP_CHECK_CMD=""
+# shellcheck disable=SC1090
+[[ -r $CONF ]] && . "$CONF"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+mkdir -p "$CACHE_DIR"
+now=$(date +%s)
+
+# keep previous update results unless it's time to refresh
+UPD_COUNT="" UPD_TS=""
+[[ -r $OUT ]] && eval "$(grep -E '^UPD_(COUNT|TS)=' "$OUT")"
+
+lines=()
+emit() { lines+=("$(printf '%s=%q' "$1" "$2")"); }
+
+# --- pacman updates (checkupdates from pacman-contrib; exit 2 = nothing to do) -----
+pacdb_mtime=$(stat -c %Y /var/lib/pacman/local 2>/dev/null || echo 0)
+if [[ ${1:-} == --updates || -z $UPD_TS ]] ||
+   (( now - UPD_TS >= UPDATE_INTERVAL || pacdb_mtime > UPD_TS )); then
+  if have checkupdates; then
+    out=$(timeout 300 checkupdates 2>/dev/null); rc=$?
+    if (( rc == 0 )); then UPD_COUNT=$(grep -c . <<<"$out"); UPD_TS=$now
+    elif (( rc == 2 )); then UPD_COUNT=0; UPD_TS=$now
+    fi
+  fi
+fi
+[[ -n $UPD_TS ]] && { emit UPD_COUNT "$UPD_COUNT"; emit UPD_TS "$UPD_TS"; }
+
+# --- containers (docker first, then podman) ---------------------------------------
+for eng in docker podman; do
+  have "$eng" || continue
+  emit CTR_ENGINE "$eng"
+  if st=$(timeout 15 "$eng" ps --format '{{.Status}}' 2>/dev/null); then
+    emit CTR_RUNNING "$(grep -c . <<<"$st")"
+    emit CTR_UNHEALTHY "$(grep -c '(unhealthy)' <<<"$st")"
+  else
+    emit CTR_ERR 1
+  fi
+  break
+done
+
+# --- backup (user-defined check; first line of output + exit code) ----------------
+if [[ -n $BACKUP_CHECK_CMD ]]; then
+  bout=$(timeout 120 bash -c "$BACKUP_CHECK_CMD" 2>&1); brc=$?
+  emit BACKUP_LINE "${bout%%$'\n'*}"; emit BACKUP_RC "$brc"; emit BACKUP_TS "$now"
+fi
+
+# --- snapper snapshots --------------------------------------------------------------
+if have snapper && snapper list-configs 2>/dev/null | grep -qw root; then
+  sj=$(timeout 30 snapper --jsonout -c root list 2>/dev/null || true)
+  if [[ -n $sj ]] && have jq; then
+    emit SNAP_COUNT "$(jq '[.root[]? | select(.number > 0)] | length' <<<"$sj" 2>/dev/null || echo 0)"
+    emit SNAP_LAST  "$(jq -r '[.root[]? | select(.number > 0)] | last | .date // empty' <<<"$sj" 2>/dev/null | cut -c1-16)"
+  fi
+fi
+
+# --- crowdsec -----------------------------------------------------------------------
+if have cscli; then
+  j=$(timeout 60 cscli decisions list --all --limit 0 -o json 2>/dev/null ||
+      timeout 60 cscli decisions list --all -o json 2>/dev/null)
+  [[ -z $j || $j == null ]] && j='[]'
+  emit CS_BANNED "$(jq '[.[]?.decisions[]? | select(.origin == "crowdsec" or .origin == "cscli")] | length' <<<"$j" 2>/dev/null || echo 0)"
+  emit CS_BLOCKLIST "$(jq '[.[]?.decisions[]? | select(.origin == "CAPI" or .origin == "lists")] | length' <<<"$j" 2>/dev/null || echo 0)"
+  if systemctl list-unit-files 'crowdsec-firewall-bouncer*' --no-legend 2>/dev/null | grep -q .; then
+    if systemctl is-active --quiet 'crowdsec-firewall-bouncer*'; then emit CS_FW active; else emit CS_FW inactive; fi
+  else
+    emit CS_FW absent
+  fi
+fi
+
+# --- ssh failed logins (24h) ----------------------------------------------------------
+slog=$(timeout 60 journalctl --since "24 hours ago" -o cat -t sshd -t sshd-session 2>/dev/null |
+       grep -E 'Failed (password|publickey|none|keyboard-interactive)|Invalid user' |
+       grep -v 'Failed .* for invalid user')
+emit SSH_FAILS "$(grep -c . <<<"$slog")"
+emit SSH_IPS "$(grep -oE 'from [0-9a-fA-F:.]+' <<<"$slog" | sort -u | grep -c .)"
+
+# --- netbird ----------------------------------------------------------------------------
+if have netbird && nj=$(timeout 15 netbird status --json 2>/dev/null); then
+  emit NB_CONNECTED "$(jq -r '.peers.connected // 0' <<<"$nj")"
+  emit NB_TOTAL "$(jq -r '.peers.total // 0' <<<"$nj")"
+  emit NB_MGMT "$(jq -r '.management.connected // true' <<<"$nj")"
+fi
+
+emit COLLECTED_TS "$now"
+tmp=$(mktemp "$CACHE_DIR/.status.XXXXXX")
+printf '%s\n' "${lines[@]}" > "$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" "$OUT"

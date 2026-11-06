@@ -1,0 +1,14 @@
+[Unit]
+Description=archcloud: apply seed volume (authorized_keys, hostname) to the live environment
+DefaultDependencies=no
+After=systemd-udev-settle.service local-fs.target
+Wants=systemd-udev-settle.service
+Before=sshd.service network.target archcloud-install.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/archcloud-seed apply-live
+
+[Install]
+WantedBy=multi-user.target

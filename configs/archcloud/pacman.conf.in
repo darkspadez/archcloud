@@ -1,0 +1,29 @@
+#
+# archcloud build-time pacman.conf template.
+# build.sh renders pacman.conf from this file:
+#   @ARCHITECTURE@      -> explicit package architectures for the level
+#                          (CachyOS v3/v4 packages are tagged x86_64_v3/x86_64_v4;
+#                          "auto" would depend on the build host's CPU)
+#   @CACHYOS_REPOS@     -> repo sections for the selected ARCHCLOUD_LEVEL
+#                          (shape matches CachyOS' own install-*-repo.awk output)
+#   @DISABLE_SANDBOX@   -> "DisableSandbox" when the build host cannot use
+#                          pacman's download sandbox (e.g. amd64 emulation on
+#                          Apple Silicon), empty otherwise
+# Include paths refer to the BUILD HOST's /etc/pacman.d (pacstrap semantics);
+# tools/cachyos-host-setup.sh installs the CachyOS mirrorlists there.
+#
+
+[options]
+HoldPkg     = pacman glibc
+Architecture = @ARCHITECTURE@
+ParallelDownloads = 5
+SigLevel    = Required DatabaseOptional
+LocalFileSigLevel = Optional
+@DISABLE_SANDBOX@
+
+@CACHYOS_REPOS@
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist

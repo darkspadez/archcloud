@@ -1,0 +1,145 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  schedule:
+    - cron: '17 6 * * *'   # nightly: fresh package snapshot + CachyOS kernel
+  workflow_dispatch:
+    inputs:
+      levels:
+        description: 'JSON list of variants to build'
+        default: '["generic","v3","v4"]'
+        required: false
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck zsh
+      - run: tools/lint.sh
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        level: ${{ fromJSON(github.event_name == 'pull_request' && '["generic"]' || (github.event.inputs.levels || '["generic","v3","v4"]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: true
+      - name: Build archcloud-${{ matrix.level }} (privileged archlinux container)
+        run: |
+          df -h /
+          ./build.sh --level "${{ matrix.level }}"
+          df -h /
+      - name: Rename checksum file per variant
+        run: |
+          cd out
+          mv sha256sums "sha256sums-${{ matrix.level }}.txt"
+          cat "sha256sums-${{ matrix.level }}.txt" metrics.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archcloud-${{ matrix.level }}
+          path: |
+            out/*.iso
+            out/sha256sums-*.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        level: ${{ fromJSON(github.event_name == 'pull_request' && '["generic"]' || (github.event.inputs.levels || '["generic","v3","v4"]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: archcloud-${{ matrix.level }}
+          path: out
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf xorriso
+          if [ -e /dev/kvm ]; then sudo chmod a+rw /dev/kvm; echo "kvm: yes"; else echo "kvm: no (TCG)"; fi
+      - name: Smoke boot (UEFI)
+        run: tools/boot-test.sh -u -i out/archcloud-${{ matrix.level }}-*.iso --timeout 900
+      - name: Smoke boot (BIOS)
+        run: tools/boot-test.sh -b -i out/archcloud-${{ matrix.level }}-*.iso --timeout 900
+
+  e2e:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: archcloud-generic
+          path: out
+      - name: Install QEMU + OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils ovmf xorriso
+          if [ -e /dev/kvm ]; then sudo chmod a+rw /dev/kvm; echo "kvm: yes"; else echo "kvm: no (TCG)"; fi
+      - name: Unattended install + boot the result (UEFI and BIOS) + reinstall guard
+        run: tools/install-test.sh -i out/archcloud-generic-*.iso --keep
+      - name: Collect serial logs on failure
+        if: failure()
+        run: |
+          mkdir -p logs
+          find /tmp -maxdepth 2 -name 'serial-*.log' -exec cp {} logs/ \; 2>/dev/null || true
+          ls -la logs || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-serial-logs
+          path: logs
+          if-no-files-found: ignore
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [smoke, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archcloud-*
+          path: dist
+          merge-multiple: true
+      - name: Combine checksums
+        run: |
+          cd dist
+          cat sha256sums-*.txt > sha256sums
+          rm -f sha256sums-*.txt
+          ls -la
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*.iso dist/sha256sums \
+            --repo "${GITHUB_REPOSITORY}" --title "archcloud ${GITHUB_REF_NAME}" --generate-notes

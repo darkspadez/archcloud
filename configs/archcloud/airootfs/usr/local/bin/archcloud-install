@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+#
+# archcloud-install — unattended Arch Linux / CachyOS installer for cloud VMs.
+#
+#   archcloud-install                 show the plan, count down, install, reboot
+#   archcloud-install --auto          service mode (honours AUTOINSTALL=no)
+#   archcloud-install --dry-run       print the plan, touch nothing
+#   archcloud-install --yes           skip the countdown
+#   archcloud-install --no-reboot     stay in the live system afterwards
+#   archcloud-install --disk /dev/vdb --hostname web1 --user ops --level v3 \
+#                     --timezone UTC --password-hash '$6$...' --force
+#   archcloud-install abort           abort a running countdown / installation
+#   archcloud-install status          show the installer log
+#   archcloud-install --version
+#
+# Layout: GPT → 1 MiB BIOS boot + 1 GiB ESP (/efi) + btrfs (@ @home @snapshots
+# @var_log @pkg). Hybrid GRUB (BIOS + UEFI). pacstrap from the CachyOS repos at
+# the probed CPU level, then arch-server-bootstrap runs inside arch-chroot and a
+# first-boot service finishes whatever needs a live system.
+set -Eeuo pipefail
+# shellcheck source=../lib/archcloud/lib.sh
+source /usr/local/lib/archcloud/lib.sh
+
+MODE=install AUTO=0 DRY_RUN=0 YES=0
+declare -a CLI_OVERRIDES=()
+TARGET_DISK="" TARGET_DISK_SIZE="" CPU_LEVEL="" SEED_DIR="" ESP_DEV="" ROOT_DEV=""
+
+usage()   { sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; }
+version() { printf 'archcloud-install %s (iso level: %s)\n' "$(cat /version 2>/dev/null || echo dev)" "$(cat /etc/archcloud/iso-level 2>/dev/null || echo '?')"; }
+
+while (( $# )); do
+  case "$1" in
+    abort|status)     MODE=$1; shift ;;
+    --auto)           AUTO=1; shift ;;
+    --dry-run)        DRY_RUN=1; shift ;;
+    --yes|-y)         YES=1; shift ;;
+    --no-reboot)      CLI_OVERRIDES+=("REBOOT=no"); shift ;;
+    --force)          CLI_OVERRIDES+=("FORCE=yes"); shift ;;
+    --disk)           CLI_OVERRIDES+=("DISK=$2"); shift 2 ;;
+    --hostname)       CLI_OVERRIDES+=("HOSTNAME=$2"); shift 2 ;;
+    --user)           CLI_OVERRIDES+=("USER=$2"); shift 2 ;;
+    --level)          CLI_OVERRIDES+=("CACHYOS_LEVEL=$2"); shift 2 ;;
+    --timezone)       CLI_OVERRIDES+=("TIMEZONE=$2"); shift 2 ;;
+    --password-hash)  CLI_OVERRIDES+=("PASSWORD_HASH=$2"); shift 2 ;;
+    --version)        version; exit 0 ;;
+    -h|--help)        usage; exit 0 ;;
+    *) die "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+mkdir -p "$RUN_DIR"
+case "$MODE" in
+  abort)
+    touch "$ABORT_FLAG"
+    tmux -L archcloud send-keys -t archcloud C-c 2>/dev/null || true
+    echo "abort requested"; exit 0 ;;
+  status)
+    if [[ -f "$LOG_FILE" ]]; then tail -n 40 "$LOG_FILE"; else echo "no installer log yet"; fi
+    exit 0 ;;
+esac
+
+[[ $EUID -eq 0 ]] || die "run as root"
+[[ -d /run/archiso ]] || die "archcloud-install only runs inside the archcloud live environment"
+rm -f "$ABORT_FLAG"
+exec > >(tee -a "$LOG_FILE") 2>&1
+# shellcheck disable=SC2154  # rc is assigned inside the trap
+trap 'rc=$?; if (( rc )); then
+        warn "installer failed (exit $rc) near line $LINENO: $BASH_COMMAND"
+        warn "target left mounted at $TARGET for inspection; log: $LOG_FILE"
+      fi' ERR
+
+#--- plan --------------------------------------------------------------------------
+load_config
+for ov in "${CLI_OVERRIDES[@]}"; do cfg_set "${ov%%=*}" "${ov#*=}"; done
+derive_hostname
+validate_config
+
+if (( AUTO )) && [[ "${CFG[AUTOINSTALL]}" != yes ]]; then
+  log "AUTOINSTALL=${CFG[AUTOINSTALL]} — not installing automatically. Run 'archcloud-install' by hand."
+  exit 0
+fi
+
+log "$(version) starting"
+probe_cpu_level
+select_disk
+guard_existing_install
+
+print_plan() {
+  local keys fps
+  keys=$(grep -vE '^\s*(#|$)' <<<"${CFG[SSH_PUBKEY]}" || true)
+  fps=$(ssh-keygen -lf <(printf '%s\n' "$keys") 2>/dev/null | awk '{print "   "$2" "$3" "$4}' || echo "   (unparseable key)")
+  cat <<EOF
+
+ ────────────────────────────────────────────────────────────────────
+  archcloud — unattended install plan
+ ────────────────────────────────────────────────────────────────────
+  target disk     $TARGET_DISK ($TARGET_DISK_SIZE)   <-- WILL BE WIPED
+  firmware        $(firmware)   hypervisor: $(hypervisor)
+  hostname        ${CFG[HOSTNAME]}
+  user            ${CFG[USER]}   password: $([[ -n "${CFG[PASSWORD_HASH]}" ]] && echo "from hash" || echo "locked")   sudo: NOPASSWD
+  ssh keys
+$fps
+  cachyos level   $CPU_LEVEL (target)   iso: $(cat /etc/archcloud/iso-level 2>/dev/null || echo '?')
+  kernel          linux-cachyos-server$([[ "${CFG[KEEP_STOCK_KERNEL]}" == true ]] && echo " + linux (fallback)")
+  layout          GPT: 1M bios-boot | 1G ESP -> /efi | btrfs @ @home @snapshots @var_log @pkg
+  timezone        ${CFG[TIMEZONE]}   locale: ${CFG[LOCALE]}   keymap: ${CFG[KEYMAP]}
+  lazyvim         ${CFG[INSTALL_LAZYVIM]}   reboot after: ${CFG[REBOOT]}   seed: ${SEED_DIR:-none}
+ ────────────────────────────────────────────────────────────────────
+EOF
+}
+print_plan
+
+if (( DRY_RUN )); then log "dry run — nothing was touched"; exit 0; fi
+
+#--- countdown ---------------------------------------------------------------------
+countdown() {
+  local n="${CFG[COUNTDOWN]}" key
+  (( YES )) && n=0
+  (( n > 0 )) || return 0
+  info "starting in ${n}s — press any key here, or run 'archcloud-install abort' over SSH, to abort"
+  local have_tty=0
+  if { exec 3</dev/tty; } 2>/dev/null; then have_tty=1; fi
+  while (( n > 0 )); do
+    [[ -e "$ABORT_FLAG" ]] && { echo; die "aborted (archcloud-install abort)"; }
+    printf '\r   %3ds ' "$n"
+    if (( have_tty )); then
+      if read -r -t 1 -n 1 -s _ <&3; then echo; die "aborted by keypress"; fi
+    else
+      sleep 1
+    fi
+    n=$(( n - 1 ))
+  done
+  echo
+  (( have_tty )) && exec 3<&-
+  return 0
+}
+countdown
+
+#--- preflight that needs the network ----------------------------------------------
+check_network
+check_keyring
+if command -v cachyos-rate-mirrors >/dev/null 2>&1; then
+  info "ranking mirrors (bounded to 4 min)"
+  timeout 240 cachyos-rate-mirrors >/dev/null 2>&1 || warn "mirror ranking skipped/failed; using the default mirrorlists"
+fi
+
+#--- disk ---------------------------------------------------------------------------
+partition_and_format() {
+  log "Partitioning $TARGET_DISK (GPT: bios-boot, ESP, btrfs root)"
+  umount -R "$TARGET" 2>/dev/null || true
+  wipefs -af "$TARGET_DISK" >/dev/null
+  sgdisk --zap-all "$TARGET_DISK" >/dev/null
+  sgdisk -n1:0:+1MiB -t1:ef02 -c1:bios-boot \
+         -n2:0:+1GiB -t2:ef00 -c2:esp \
+         -n3:0:0     -t3:8304 -c3:"$ROOT_PARTLABEL" "$TARGET_DISK" >/dev/null
+  partprobe "$TARGET_DISK" 2>/dev/null || true
+  udevadm settle
+  ESP_DEV=$(part_path "$TARGET_DISK" 2); ROOT_DEV=$(part_path "$TARGET_DISK" 3)
+  wait_for "partitions $ESP_DEV $ROOT_DEV" 20 1 test -b "$ESP_DEV" -a -b "$ROOT_DEV" \
+    || die "partition device nodes did not appear"
+
+  log "Formatting: $ESP_DEV (FAT32 ESP), $ROOT_DEV (btrfs '$BTRFS_LABEL')"
+  mkfs.fat -F32 -n ESP "$ESP_DEV" >/dev/null
+  mkfs.btrfs -f -L "$BTRFS_LABEL" "$ROOT_DEV" >/dev/null
+
+  mount "$ROOT_DEV" "$TARGET"
+  local sv
+  for sv in @ @home @snapshots @var_log @pkg; do btrfs subvolume create "$TARGET/$sv" >/dev/null; done
+  umount "$TARGET"
+
+  local opts="compress=zstd:1,noatime,space_cache=v2,discard=async"
+  mount -o "$opts,subvol=@" "$ROOT_DEV" "$TARGET"
+  mkdir -p "$TARGET"/{home,.snapshots,var/log,var/cache/pacman/pkg,efi}
+  mount -o "$opts,subvol=@home"      "$ROOT_DEV" "$TARGET/home"
+  mount -o "$opts,subvol=@snapshots" "$ROOT_DEV" "$TARGET/.snapshots"
+  mount -o "$opts,subvol=@var_log"   "$ROOT_DEV" "$TARGET/var/log"
+  mount -o "$opts,subvol=@pkg"       "$ROOT_DEV" "$TARGET/var/cache/pacman/pkg"
+  mount "$ESP_DEV" "$TARGET/efi"
+  chmod 750 "$TARGET/.snapshots"
+}
+
+#--- packages ------------------------------------------------------------------------
+install_base() {
+  render_pacman_conf "$CPU_LEVEL" "$RUN_DIR/pacman.conf"
+  local -a pkgs
+  mapfile -t pkgs < <(target_packages)
+  log "pacstrap (${#pkgs[@]} packages, CachyOS level $CPU_LEVEL)"
+  # No -K: the live ISO's keyring (populated with archlinux + cachyos by
+  # pacman-init.service) is copied into the target, so signatures verify.
+  pacstrap -C "$RUN_DIR/pacman.conf" "$TARGET" "${pkgs[@]}"
+  install -m644 "$RUN_DIR/pacman.conf" "$TARGET/etc/pacman.conf"
+}
+
+#--- system configuration ------------------------------------------------------------
+configure_target() {
+  log "Configuring the target system"
+  genfstab -U "$TARGET" > "$TARGET/etc/fstab"
+
+  printf '%s\n' "${CFG[HOSTNAME]}" > "$TARGET/etc/hostname"
+  cat > "$TARGET/etc/hosts" <<EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   ${CFG[HOSTNAME]}.localdomain ${CFG[HOSTNAME]}
+EOF
+
+  local loc="${CFG[LOCALE]}" loc_re
+  loc_re=$(printf '%s' "$loc" | sed 's/[.[\*^$]/\\&/g')
+  sed -i -E "s/^#\s*(${loc_re}( |$))/\1/" "$TARGET/etc/locale.gen"
+  grep -qE "^${loc_re}( |$)" "$TARGET/etc/locale.gen" || printf '%s UTF-8\n' "$loc" >> "$TARGET/etc/locale.gen"
+  arch-chroot "$TARGET" locale-gen >/dev/null
+  printf 'LANG=%s\n' "$loc" > "$TARGET/etc/locale.conf"
+  printf 'KEYMAP=%s\n' "${CFG[KEYMAP]}" > "$TARGET/etc/vconsole.conf"
+
+  ln -sf "/usr/share/zoneinfo/${CFG[TIMEZONE]}" "$TARGET/etc/localtime"
+  arch-chroot "$TARGET" hwclock --systohc 2>/dev/null || warn "hwclock --systohc failed (harmless under some hypervisors)"
+
+  # network: systemd-networkd DHCP/RA + optional seed overrides
+  install -Dm644 "$ARCHCLOUD_TEMPLATES/20-wired.network" "$TARGET/etc/systemd/network/20-wired.network"
+  if [[ -n "$SEED_DIR" && -d "$SEED_DIR/network" ]]; then
+    install -m644 "$SEED_DIR"/network/*.network "$TARGET/etc/systemd/network/" 2>/dev/null \
+      && info "seed network files installed" || true
+  fi
+  # (resolv.conf becomes the resolved stub symlink in finish(): arch-chroot
+  #  bind-mounts the live resolv.conf onto a regular file during the chroot phase)
+  systemctl --root="$TARGET" enable systemd-networkd systemd-resolved systemd-timesyncd sshd >/dev/null
+
+  # initramfs: portable virtual drivers; the bootstrap runs mkinitcpio -P later
+  install -Dm644 "$ARCHCLOUD_TEMPLATES/mkinitcpio-archcloud.conf" "$TARGET/etc/mkinitcpio.conf.d/archcloud.conf"
+
+  # bootloader: hybrid GRUB
+  install -Dm644 "$ARCHCLOUD_TEMPLATES/default-grub" "$TARGET/etc/default/grub"
+  log "Installing GRUB for BIOS and UEFI"
+  arch-chroot "$TARGET" grub-install --target=i386-pc --recheck "$TARGET_DISK" >/dev/null
+  arch-chroot "$TARGET" grub-install --target=x86_64-efi --efi-directory=/efi \
+    --bootloader-id=archcloud --removable --recheck >/dev/null
+  if [[ "$(firmware)" == UEFI ]]; then
+    arch-chroot "$TARGET" grub-install --target=x86_64-efi --efi-directory=/efi \
+      --bootloader-id=archcloud --recheck >/dev/null || warn "could not register a UEFI boot entry (removable path still boots)"
+  fi
+
+  arch-chroot "$TARGET" passwd -l root >/dev/null
+}
+
+#--- bootstrap in chroot ---------------------------------------------------------------
+run_bootstrap() {
+  log "Running arch-server-bootstrap inside the chroot (this takes a while)"
+  install -Dm755 "$ARCHCLOUD_LIB_DIR/arch-server-bootstrap.sh" "$TARGET/usr/local/sbin/arch-server-bootstrap"
+  mkdir -p "$TARGET/usr/local/lib/arch-server-bootstrap"
+  rm -rf "$TARGET/usr/local/lib/arch-server-bootstrap/templates"
+  cp -a "$ARCHCLOUD_TEMPLATES" "$TARGET/usr/local/lib/arch-server-bootstrap/templates"
+
+  local first_key
+  first_key=$(grep -vE '^\s*(#|$)' <<<"${CFG[SSH_PUBKEY]}" | head -n1)
+  arch-chroot "$TARGET" env \
+      BOOTSTRAP_CHROOT=1 \
+      TARGET_HOSTNAME="${CFG[HOSTNAME]}" \
+      CREATE_USER="${CFG[USER]}" \
+      SSH_PUBKEY="$first_key" \
+      PASSWORD_HASH="${CFG[PASSWORD_HASH]}" \
+      KEEP_STOCK_KERNEL="${CFG[KEEP_STOCK_KERNEL]}" \
+      INSTALL_LAZYVIM="${CFG[INSTALL_LAZYVIM]}" \
+      /usr/local/sbin/arch-server-bootstrap --unattended \
+    || warn "arch-server-bootstrap reported a failure; the first-boot finisher will retry unfinished steps"
+
+  # Every configured key for the user (bootstrap installed the first one).
+  local home keyfile line
+  home=$(awk -F: -v u="${CFG[USER]}" '$1==u{print $6}' "$TARGET/etc/passwd")
+  if [[ -n "$home" && -d "$TARGET$home" ]]; then
+    keyfile="$TARGET$home/.ssh/authorized_keys"
+    install -d -m700 "$(dirname "$keyfile")"
+    touch "$keyfile"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      grep -qxF -- "$line" "$keyfile" || printf '%s\n' "$line" >> "$keyfile"
+    done <<<"${CFG[SSH_PUBKEY]}"
+    chmod 600 "$keyfile"
+    arch-chroot "$TARGET" chown -R "${CFG[USER]}:${CFG[USER]}" "$home/.ssh"
+  else
+    warn "home directory for ${CFG[USER]} not found; SSH keys not installed"
+  fi
+
+  install -Dm644 "$ARCHCLOUD_TEMPLATES/arch-server-bootstrap-finish.service" \
+    "$TARGET/etc/systemd/system/arch-server-bootstrap-finish.service"
+  systemctl --root="$TARGET" enable arch-server-bootstrap-finish.service >/dev/null
+}
+
+#--- finish -------------------------------------------------------------------------------
+finish() {
+  cat > "$TARGET/etc/archcloud-release" <<EOF
+ARCHCLOUD_VERSION=$(cat /version 2>/dev/null || echo dev)
+ARCHCLOUD_ISO_LEVEL=$(cat /etc/archcloud/iso-level 2>/dev/null || echo unknown)
+ARCHCLOUD_TARGET_LEVEL=$CPU_LEVEL
+ARCHCLOUD_INSTALLED=$(date -u +%FT%TZ)
+ARCHCLOUD_DISK=$TARGET_DISK
+EOF
+  cp "$LOG_FILE" "$TARGET/var/log/archcloud-install.log" 2>/dev/null || true
+  rm -f "$TARGET/etc/resolv.conf"
+  ln -s /run/systemd/resolve/stub-resolv.conf "$TARGET/etc/resolv.conf"
+  sync
+  umount -R "$TARGET"
+  log "Installation finished: ${CFG[HOSTNAME]} on $TARGET_DISK (CachyOS $CPU_LEVEL)"
+  if [[ "${CFG[REBOOT]}" == yes ]]; then
+    log "Rebooting in 5 s — remove/deprioritise the ISO so the disk boots first"
+    sleep 5
+    systemctl reboot
+  else
+    log "REBOOT=no: staying in the live system (target unmounted)"
+  fi
+}
+
+partition_and_format
+install_base
+configure_target
+run_bootstrap
+finish

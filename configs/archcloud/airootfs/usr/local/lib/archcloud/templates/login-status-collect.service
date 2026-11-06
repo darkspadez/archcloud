@@ -1,0 +1,11 @@
+# installed by arch-server-bootstrap (archcloud)
+[Unit]
+Description=Collect cached data for the login status screen
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/login-status-collect
+Nice=10
+IOSchedulingClass=idle
