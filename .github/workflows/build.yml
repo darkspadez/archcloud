@@ -84,10 +84,15 @@ jobs:
           path: out
       - name: Install QEMU + OVMF
         run: |
-          # background apt-daily/unattended-upgrades can hold the dpkg lock for a long time
-          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null || true
-          sudo apt-get -o DPkg::Lock::Timeout=600 update -qq
-          sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq qemu-system-x86 qemu-utils ovmf xorriso
+          # Some runners boot with an unattended-upgrades run in progress that holds
+          # the dpkg lock for 20+ minutes; `systemctl stop` would wait for it. Kill it.
+          sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+          sudo systemctl kill --signal=KILL unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          sudo pkill -9 -f 'unattended-upgrade|apt-get|apt\.systemd\.daily' 2>/dev/null || true
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+          sudo dpkg --configure -a >/dev/null 2>&1 || true
+          sudo apt-get -o DPkg::Lock::Timeout=300 update -qq
+          sudo apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends qemu-system-x86 qemu-utils ovmf xorriso
           if [ -e /dev/kvm ]; then sudo chmod a+rw /dev/kvm; echo "kvm: yes"; else echo "kvm: no (TCG)"; fi
           grep -m1 'model name' /proc/cpuinfo; grep -o -w 'avx2\|avx512f' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
       - name: Smoke boot (UEFI)
@@ -107,9 +112,13 @@ jobs:
           path: out
       - name: Install QEMU + OVMF
         run: |
-          sudo systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null || true
-          sudo apt-get -o DPkg::Lock::Timeout=600 update -qq
-          sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq qemu-system-x86 qemu-utils ovmf xorriso
+          sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+          sudo systemctl kill --signal=KILL unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+          sudo pkill -9 -f 'unattended-upgrade|apt-get|apt\.systemd\.daily' 2>/dev/null || true
+          sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+          sudo dpkg --configure -a >/dev/null 2>&1 || true
+          sudo apt-get -o DPkg::Lock::Timeout=300 update -qq
+          sudo apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends qemu-system-x86 qemu-utils ovmf xorriso
           if [ -e /dev/kvm ]; then sudo chmod a+rw /dev/kvm; echo "kvm: yes"; else echo "kvm: no (TCG)"; fi
       - name: Unattended install + boot the result (UEFI and BIOS) + reinstall guard
         run: tools/install-test.sh -i out/archcloud-generic-*.iso --keep
