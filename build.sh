@@ -27,7 +27,7 @@ usage() { sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-
 while (( $# )); do
   case "$1" in
     --level)        LEVELS+=("$2"); shift 2 ;;
-    --all)          LEVELS=(generic v3 v4); shift ;;
+    --all)          LEVELS=(generic v3 v4 znver4); shift ;;
     --out)          OUT_DIR="$2"; shift 2 ;;
     --work)         WORK_DIR="$2"; shift 2 ;;
     --in-container) shift ;;   # marker only; Arch detection below decides
@@ -37,7 +37,7 @@ while (( $# )); do
 done
 (( ${#LEVELS[@]} )) || LEVELS=(generic)
 for l in "${LEVELS[@]}"; do
-  case "$l" in generic|v3|v4) ;; *) die "invalid level '$l' (generic|v3|v4)" ;; esac
+  case "$l" in generic|v3|v4|znver4) ;; *) die "invalid level '$l' (generic|v3|v4|znver4)" ;; esac
 done
 
 # --- not on Arch: re-exec in a container ---------------------------------------
@@ -79,6 +79,12 @@ render_pacman_conf() {
       repos+=$'[cachyos-core-v3]\nInclude = /etc/pacman.d/cachyos-v3-mirrorlist\n\n'
       repos+=$'[cachyos-extra-v3]\nInclude = /etc/pacman.d/cachyos-v3-mirrorlist\n\n'
       repos+=$'[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist\n' ;;
+    znver4)
+      arch="x86_64 x86_64_v3 x86_64_v4"
+      repos=$'[cachyos-znver4]\nInclude = /etc/pacman.d/cachyos-v4-mirrorlist\n\n'
+      repos+=$'[cachyos-core-znver4]\nInclude = /etc/pacman.d/cachyos-v4-mirrorlist\n\n'
+      repos+=$'[cachyos-extra-znver4]\nInclude = /etc/pacman.d/cachyos-v4-mirrorlist\n\n'
+      repos+=$'[cachyos]\nInclude = /etc/pacman.d/cachyos-mirrorlist\n' ;;
     v4)
       arch="x86_64 x86_64_v3 x86_64_v4"
       repos=$'[cachyos-v4]\nInclude = /etc/pacman.d/cachyos-v4-mirrorlist\n\n'
@@ -102,7 +108,7 @@ render_pacman_conf() {
 # die with "Illegal instruction" and the build fails half-way.
 check_host_cpu() {
   local level="$1" need=""
-  case "$level" in v3) need=avx2 ;; v4) need=avx512f ;; esac
+  case "$level" in v3) need=avx2 ;; v4) need=avx512f ;; znver4) need=avx512_bf16 ;; esac
   [[ -n "$need" ]] || return 0
   grep -m1 '^flags' /proc/cpuinfo | grep -qw "$need" && return 0
   [[ "${ARCHCLOUD_FORCE_BUILD:-}" == 1 ]] && { log "host CPU lacks $need but ARCHCLOUD_FORCE_BUILD=1"; return 0; }

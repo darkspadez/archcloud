@@ -19,10 +19,13 @@ installed system):
 | `archcloud-generic-*.iso` | any x86-64 | `[cachyos]` (generic x86-64 kernel) |
 | `archcloud-v3-*.iso` | x86-64-v3 (AVX2) CPUs | `[cachyos-v3]` + generic |
 | `archcloud-v4-*.iso` | x86-64-v4 (AVX-512) CPUs | `[cachyos-v4]` + generic |
+| `archcloud-znver4-*.iso` | AMD Zen 4 / Zen 5 (AVX-512 incl. BF16) | `[cachyos-znver4]` + generic |
 
 When in doubt use **generic**.
 
-Building a v3/v4 ISO needs a build host whose CPU can *execute* v3/v4 code: pacstrap runs the
+Zen 5 has no repo of its own (CachyOS publishes none); Zen 5 CPUs run the znver4 build.
+
+Building a v3/v4/znver4 ISO needs a build host whose CPU can *execute* v3/v4 code: pacstrap runs the
 installed packages' hooks inside the chroot. GitHub's runners all have AVX2 but only some have
 AVX-512, so the CI v4 job skips itself (with a warning) when it lands on an unsuitable machine;
 re-run that job (`gh run rerun <id> --job <job-id>`) or trigger the workflow with

@@ -34,10 +34,11 @@ command -v "$QEMU_BIN" >/dev/null || tdie "$QEMU_BIN not installed"
 # v3/v4 ISOs carry kernels/userland that SIGILL on CPUs without AVX2/AVX-512.
 # With KVM the guest sees the host CPU, so skip (not fail) on an unsuitable host.
 level=generic
-[[ "$(basename "$ISO")" =~ ^archcloud-(generic|v3|v4)- ]] && level=${BASH_REMATCH[1]}
+[[ "$(basename "$ISO")" =~ ^archcloud-(generic|v3|v4|znver4)- ]] && level=${BASH_REMATCH[1]}
 if [[ -w /dev/kvm ]]; then
   case "$level" in
     v3) grep -qw avx2 /proc/cpuinfo    || { tlog "SKIP: host CPU lacks AVX2, cannot boot a v3 ISO under KVM"; exit 0; } ;;
+    znver4) grep -qw avx512_bf16 /proc/cpuinfo || { tlog "SKIP: host CPU lacks AVX-512 BF16 (Zen4-class), cannot boot a znver4 ISO under KVM"; exit 0; } ;;
     v4) grep -qw avx512f /proc/cpuinfo || { tlog "SKIP: host CPU lacks AVX-512, cannot boot a v4 ISO under KVM"; exit 0; } ;;
   esac
 fi

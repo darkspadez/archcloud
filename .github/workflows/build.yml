@@ -11,7 +11,7 @@ on:
     inputs:
       levels:
         description: 'JSON list of variants to build'
-        default: '["generic","v3","v4"]'
+        default: '["generic","v3","v4","znver4"]'
         required: false
 
 concurrency:
@@ -36,13 +36,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        level: ${{ fromJSON(github.event_name == 'pull_request' && '["generic"]' || (github.event.inputs.levels || '["generic","v3","v4"]')) }}
+        level: ${{ fromJSON(github.event_name == 'pull_request' && '["generic"]' || (github.event.inputs.levels || '["generic","v3","v4","znver4"]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Check the runner CPU can execute ${{ matrix.level }} binaries
         id: cpu
         run: |
-          need=""; case "${{ matrix.level }}" in v3) need=avx2;; v4) need=avx512f;; esac
+          need=""; case "${{ matrix.level }}" in v3) need=avx2;; v4) need=avx512f;; znver4) need=avx512_bf16;; esac
           grep -m1 'model name' /proc/cpuinfo
           if [ -n "$need" ] && ! grep -m1 '^flags' /proc/cpuinfo | grep -qw "$need"; then
             echo "::warning title=${{ matrix.level }} skipped::this runner's CPU lacks $need; pacstrap hooks would SIGILL. Re-run the job to land on another runner (gh run rerun --job)."
@@ -90,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        level: ${{ fromJSON(github.event_name == 'pull_request' && '["generic"]' || (github.event.inputs.levels || '["generic","v3","v4"]')) }}
+        level: ${{ fromJSON(github.event_name == 'pull_request' && '["generic"]' || (github.event.inputs.levels || '["generic","v3","v4","znver4"]')) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -177,7 +177,7 @@ jobs:
           {
             echo "## Variants in this release"
             for iso in *.iso; do echo "- \`$iso\`"; done
-            for l in generic v3 v4; do
+            for l in generic v3 v4 znver4; do
               ls archcloud-"$l"-*.iso >/dev/null 2>&1 || echo "- **$l: not built** (the CI runner's CPU could not execute $l package hooks; re-run the build job on another runner and re-tag, or build locally on a capable host)"
             done
             echo; echo "Verify with \`sha256sum -c sha256sums\`. Boot: default entry installs after a 30 s countdown; \`rescue shell\` never touches the disk."
@@ -186,5 +186,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/*.iso dist/sha256sums \
-            --repo "${GITHUB_REPOSITORY}" --title "archcloud ${GITHUB_REF_NAME}" --notes-file notes.md
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.iso dist/sha256sums --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release edit "${GITHUB_REF_NAME}" --notes-file notes.md --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.iso dist/sha256sums \
+              --repo "${GITHUB_REPOSITORY}" --title "archcloud ${GITHUB_REF_NAME}" --notes-file notes.md
+          fi
