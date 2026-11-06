@@ -82,7 +82,7 @@ assert_installed() { # FW
 
   r() { run_ssh "$key" "$p" "$USER_NAME" "$@"; }
 
-  [[ "$(r hostname)" == citest ]] || tdie "[$fw] hostname mismatch"
+  [[ "$(r uname -n)" == citest ]] || tdie "[$fw] hostname mismatch (got '$(r uname -n)')"
   r 'sudo -n true' || tdie "[$fw] passwordless sudo missing"
   r 'uname -r' | grep -q cachyos || tdie "[$fw] not running a CachyOS kernel: $(r uname -r)"
   tok "[$fw] hostname, sudo, kernel $(r uname -r)"

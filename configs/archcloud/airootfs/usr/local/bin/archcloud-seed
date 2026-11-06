@@ -60,7 +60,8 @@ apply_live() {
     hn=$(conf_get "$mnt/install.conf" HOSTNAME)
     if [[ -n "$hn" ]]; then
       printf '%s\n' "$hn" > /etc/hostname
-      hostname "$hn" 2>/dev/null || true
+      # This runs before dbus/hostnamed; set the kernel hostname directly.
+      printf '%s\n' "$hn" > /proc/sys/kernel/hostname 2>/dev/null || true
       echo "archcloud-seed: live hostname set to $hn"
     fi
   fi

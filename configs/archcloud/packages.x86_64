@@ -23,6 +23,7 @@ gptfdisk
 grml-zsh-config
 grub
 hyperv
+inetutils
 intel-ucode
 jq
 kitty-terminfo

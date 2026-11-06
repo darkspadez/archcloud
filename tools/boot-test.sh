@@ -31,6 +31,17 @@ done
 [[ -f "$ISO" ]] || tdie "ISO not found: $ISO"
 command -v "$QEMU_BIN" >/dev/null || tdie "$QEMU_BIN not installed"
 
+# v3/v4 ISOs carry kernels/userland that SIGILL on CPUs without AVX2/AVX-512.
+# With KVM the guest sees the host CPU, so skip (not fail) on an unsuitable host.
+level=generic
+[[ "$(basename "$ISO")" =~ ^archcloud-(generic|v3|v4)- ]] && level=${BASH_REMATCH[1]}
+if [[ -w /dev/kvm ]]; then
+  case "$level" in
+    v3) grep -qw avx2 /proc/cpuinfo    || { tlog "SKIP: host CPU lacks AVX2, cannot boot a v3 ISO under KVM"; exit 0; } ;;
+    v4) grep -qw avx512f /proc/cpuinfo || { tlog "SKIP: host CPU lacks AVX-512, cannot boot a v4 ISO under KVM"; exit 0; } ;;
+  esac
+fi
+
 scratch=$(mktemp -d)
 cleanup() {
   [[ -n "${qemu_pid:-}" ]] && kill "$qemu_pid" 2>/dev/null || true
@@ -61,7 +72,7 @@ out=$(run_ssh "$key" "$port" root archcloud-install --version)
 [[ "$out" == archcloud-install* ]] || tdie "unexpected --version output: $out"
 tok "$out"
 
-hn=$(run_ssh "$key" "$port" root hostname)
+hn=$(run_ssh "$key" "$port" root uname -n)
 [[ "$hn" == smoketest ]] || tdie "seed hostname not applied (got '$hn')"
 tok "seed hostname applied"
 
