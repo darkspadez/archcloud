@@ -1,5 +1,12 @@
 # Plan: `archcloud` — Arch/CachyOS unattended installer ISO for cloud VMs
 
+**Status (2026-11-06): implemented and verified.** Repo: https://github.com/darkspadez/archcloud.
+CI run for `8b46078` is green: lint, builds for generic/v3/v4 (~7 min each), QEMU smoke boots under UEFI
+and BIOS for every variant, and the end-to-end unattended install (4m20s) + boot of the installed disk
+under UEFI and BIOS + reinstall guard. Every bootstrap step is marked done after the first-boot finisher
+(which took under a minute). Caveat: a v4 ISO can only be built on an AVX-512 runner; the CI job skips
+itself otherwise and can be re-run.
+
 ## Goal
 
 Build an archiso profile (`configs/archcloud/`) that produces an **installer appliance ISO**: boot it on a
@@ -237,6 +244,8 @@ configs/archcloud/
 
 ## Steps
 
+All nine steps below are done (see the status line at the top and the implementation notes at the end).
+
 Plan:
 1. **Scaffold repo + profile skeleton** — `git init`, `.gitignore` (`work/ out/ *.iso configs/*/pacman.conf`),
    `README.md`, copy `refs/archiso/configs/releng` → `configs/archcloud`, strip hardware-only files/symlinks
@@ -338,3 +347,12 @@ pueue, modifying `refs/`.
   mkarchiso's work dir is a Docker named volume because a macOS bind mount cannot hold capability xattrs.
 - The first local build of `archcloud-generic` succeeded (1.0 GB ISO) before any QEMU test; boot and
   install tests run in CI (`tools/boot-test.sh`, `tools/install-test.sh`).
+- Found by CI and fixed: `hostname` binary absent (inetutils added); systemd 262's `systemd-loop@` fails
+  on the El Torito boot medium (masked in the live env only — the udev rule targets the *boot* disk, so
+  installed systems are unaffected); the serial getty can log in before the installer's tmux session
+  exists (login hook now waits; the installer writes `ARCHCLOUD_INSTALL_OK/FAILED` to `/dev/console`
+  so harnesses do not depend on tmux-rendered text); v3/v4 package hooks execute v3/v4 binaries during
+  pacstrap, so such variants need a capable build host (`build.sh` refuses otherwise, CI skips per
+  runner); some GitHub runners hold the dpkg lock for 20+ minutes at boot (killed before apt).
+- The CachyOS v4 mirror at cdn77 returned 404 for a few `x86_64_v4` packages during one install;
+  pacman fell back to other mirrors automatically (the installer ranks mirrors first, bounded to 4 min).
