@@ -31,7 +31,7 @@ jobs:
 
   build:
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -85,7 +85,7 @@ jobs:
 
   smoke:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -125,7 +125,7 @@ jobs:
 
   e2e:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
