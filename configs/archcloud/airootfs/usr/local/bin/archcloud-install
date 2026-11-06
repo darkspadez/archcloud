@@ -63,10 +63,14 @@ esac
 [[ -d /run/archiso ]] || die "archcloud-install only runs inside the archcloud live environment"
 rm -f "$ABORT_FLAG"
 exec > >(tee -a "$LOG_FILE") 2>&1
+# Machine-readable outcome on the kernel console (tty0 + ttyS0), bypassing the
+# tmux rendering that the serial log otherwise sees. Test harnesses grep for it.
+console_mark() { printf '\n%s %s\n' "$1" "${2:-}" > /dev/console 2>/dev/null || true; }
 # shellcheck disable=SC2154  # rc is assigned inside the trap
 trap 'rc=$?; if (( rc )); then
         warn "installer failed (exit $rc) near line $LINENO: $BASH_COMMAND"
         warn "target left mounted at $TARGET for inspection; log: $LOG_FILE"
+        console_mark ARCHCLOUD_INSTALL_FAILED "exit=$rc line=$LINENO"
       fi' ERR
 
 #--- plan --------------------------------------------------------------------------
@@ -77,6 +81,7 @@ validate_config
 
 if (( AUTO )) && [[ "${CFG[AUTOINSTALL]}" != yes ]]; then
   log "AUTOINSTALL=${CFG[AUTOINSTALL]} — not installing automatically. Run 'archcloud-install' by hand."
+  console_mark ARCHCLOUD_INSTALL_SKIPPED "autoinstall=${CFG[AUTOINSTALL]}"
   exit 0
 fi
 
@@ -299,6 +304,7 @@ EOF
   sync
   umount -R "$TARGET"
   log "Installation finished: ${CFG[HOSTNAME]} on $TARGET_DISK (CachyOS $CPU_LEVEL)"
+  console_mark ARCHCLOUD_INSTALL_OK "host=${CFG[HOSTNAME]} disk=$TARGET_DISK level=$CPU_LEVEL"
   if [[ "${CFG[REBOOT]}" == yes ]]; then
     log "Rebooting in 5 s — remove/deprioritise the ISO so the disk boots first"
     sleep 5

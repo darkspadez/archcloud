@@ -65,9 +65,13 @@ while kill -0 "$qemu_pid" 2>/dev/null; do
 done
 wait "$qemu_pid" || true
 unset qemu_pid
-grep -q "Installation finished" "$serial" || { tail -n 80 "$serial" >&2; tdie "installer did not report success"; }
-tok "installer finished and rebooted (VM exited)"
-grep -q "Rebooting in" "$serial" && tok "reboot path taken"
+# The installer writes ARCHCLOUD_INSTALL_OK/FAILED straight to the kernel console;
+# everything else in the serial log goes through tmux and may be garbled.
+if grep -aq 'ARCHCLOUD_INSTALL_FAILED' "$serial"; then
+  grep -a 'ARCHCLOUD_INSTALL_FAILED' "$serial" >&2; tail -n 80 "$serial" >&2; tdie "installer reported failure"
+fi
+grep -aq 'ARCHCLOUD_INSTALL_OK' "$serial" || { tail -n 80 "$serial" >&2; tdie "installer did not report success (no ARCHCLOUD_INSTALL_OK on the console)"; }
+tok "installer reported success and rebooted (VM exited): $(grep -ao 'ARCHCLOUD_INSTALL_OK.*' "$serial" | head -n1)"
 
 #--- phase 2: boot the installed disk -------------------------------------------------------
 assert_installed() { # FW
