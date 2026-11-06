@@ -22,6 +22,12 @@ installed system):
 
 When in doubt use **generic**.
 
+Building a v3/v4 ISO needs a build host whose CPU can *execute* v3/v4 code: pacstrap runs the
+installed packages' hooks inside the chroot. GitHub's runners all have AVX2 but only some have
+AVX-512, so the CI v4 job skips itself (with a warning) when it lands on an unsuitable machine;
+re-run that job (`gh run rerun <id> --job <job-id>`) or trigger the workflow with
+`levels='["v4"]'` to try another runner. A release lists which variants it contains.
+
 ## Quick start
 
 1. Download the ISO and `sha256sums` from the latest release; verify the checksum.

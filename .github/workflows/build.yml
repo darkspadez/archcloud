@@ -39,7 +39,19 @@ jobs:
         level: ${{ fromJSON(github.event_name == 'pull_request' && '["generic"]' || (github.event.inputs.levels || '["generic","v3","v4"]')) }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check the runner CPU can execute ${{ matrix.level }} binaries
+        id: cpu
+        run: |
+          need=""; case "${{ matrix.level }}" in v3) need=avx2;; v4) need=avx512f;; esac
+          grep -m1 'model name' /proc/cpuinfo
+          if [ -n "$need" ] && ! grep -m1 '^flags' /proc/cpuinfo | grep -qw "$need"; then
+            echo "::warning title=${{ matrix.level }} skipped::this runner's CPU lacks $need; pacstrap hooks would SIGILL. Re-run the job to land on another runner (gh run rerun --job)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Free disk space
+        if: steps.cpu.outputs.skip != 'true'
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: false
@@ -49,17 +61,20 @@ jobs:
           large-packages: false
           swap-storage: true
       - name: Build archcloud-${{ matrix.level }} (privileged archlinux container)
+        if: steps.cpu.outputs.skip != 'true'
         run: |
           df -h /
           ./build.sh --level "${{ matrix.level }}"
           df -h /
       - name: Rename checksum file per variant
+        if: steps.cpu.outputs.skip != 'true'
         run: |
           sudo chown -R "$(id -u):$(id -g)" out     # written by root inside the build container
           cd out
           mv sha256sums "sha256sums-${{ matrix.level }}.txt"
           cat "sha256sums-${{ matrix.level }}.txt" metrics.txt
       - uses: actions/upload-artifact@v4
+        if: steps.cpu.outputs.skip != 'true'
         with:
           name: archcloud-${{ matrix.level }}
           path: |
@@ -79,10 +94,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+        id: dl
+        continue-on-error: true   # the variant may have been skipped on an unsuitable build runner
         with:
           name: archcloud-${{ matrix.level }}
           path: out
+      - name: No artifact for this variant
+        if: steps.dl.outcome != 'success'
+        run: echo "::warning title=${{ matrix.level }} smoke skipped::no archcloud-${{ matrix.level }} artifact (build skipped on an unsuitable runner)"
       - name: Install QEMU + OVMF
+        if: steps.dl.outcome == 'success'
         run: |
           # Some runners boot with an unattended-upgrades run in progress that holds
           # the dpkg lock for 20+ minutes; `systemctl stop` would wait for it. Kill it.
@@ -96,8 +117,10 @@ jobs:
           if [ -e /dev/kvm ]; then sudo chmod a+rw /dev/kvm; echo "kvm: yes"; else echo "kvm: no (TCG)"; fi
           grep -m1 'model name' /proc/cpuinfo; grep -o -w 'avx2\|avx512f' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
       - name: Smoke boot (UEFI)
+        if: steps.dl.outcome == 'success'
         run: tools/boot-test.sh -u -i out/archcloud-${{ matrix.level }}-*.iso --timeout 900
       - name: Smoke boot (BIOS)
+        if: steps.dl.outcome == 'success'
         run: tools/boot-test.sh -b -i out/archcloud-${{ matrix.level }}-*.iso --timeout 900
 
   e2e:
@@ -145,15 +168,23 @@ jobs:
           pattern: archcloud-*
           path: dist
           merge-multiple: true
-      - name: Combine checksums
+      - name: Combine checksums + release notes
         run: |
           cd dist
           cat sha256sums-*.txt > sha256sums
           rm -f sha256sums-*.txt
           ls -la
+          {
+            echo "## Variants in this release"
+            for iso in *.iso; do echo "- \`$iso\`"; done
+            for l in generic v3 v4; do
+              ls archcloud-"$l"-*.iso >/dev/null 2>&1 || echo "- **$l: not built** (the CI runner's CPU could not execute $l package hooks; re-run the build job on another runner and re-tag, or build locally on a capable host)"
+            done
+            echo; echo "Verify with \`sha256sum -c sha256sums\`. Boot: default entry installs after a 30 s countdown; \`rescue shell\` never touches the disk."
+          } > ../notes.md
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/*.iso dist/sha256sums \
-            --repo "${GITHUB_REPOSITORY}" --title "archcloud ${GITHUB_REF_NAME}" --generate-notes
+            --repo "${GITHUB_REPOSITORY}" --title "archcloud ${GITHUB_REF_NAME}" --notes-file notes.md

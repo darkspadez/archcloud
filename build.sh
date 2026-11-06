@@ -96,8 +96,22 @@ render_pacman_conf() {
     || die "rendered pacman.conf lists no cachyos repo"
 }
 
+# --- host CPU check -------------------------------------------------------------------
+# pacstrap runs the installed packages' hooks inside the chroot, i.e. it executes
+# the v3/v4-compiled binaries on the build host. Without the matching ISA they
+# die with "Illegal instruction" and the build fails half-way.
+check_host_cpu() {
+  local level="$1" need=""
+  case "$level" in v3) need=avx2 ;; v4) need=avx512f ;; esac
+  [[ -n "$need" ]] || return 0
+  grep -m1 '^flags' /proc/cpuinfo | grep -qw "$need" && return 0
+  [[ "${ARCHCLOUD_FORCE_BUILD:-}" == 1 ]] && { log "host CPU lacks $need but ARCHCLOUD_FORCE_BUILD=1"; return 0; }
+  die "host CPU lacks $need: cannot build the '$level' variant on this machine (its package hooks execute $level binaries). Use a capable host or ARCHCLOUD_FORCE_BUILD=1."
+}
+
 # --- build ---------------------------------------------------------------------------
 mkdir -p "$OUT_DIR" "$WORK_DIR"
+for level in "${LEVELS[@]}"; do check_host_cpu "$level"; done
 for level in "${LEVELS[@]}"; do
   log "building archcloud-${level}"
   render_pacman_conf "$level"
