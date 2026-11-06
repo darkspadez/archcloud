@@ -246,6 +246,23 @@ EOF
   arch-chroot "$TARGET" passwd -l root >/dev/null
 }
 
+#--- never leave an unbootable disk -------------------------------------------------------
+# The bootstrap's grub_default step normally writes grub.cfg and pins the CachyOS
+# kernel. If the bootstrap aborted before that, generate the config here, and fail
+# the installation loudly when the kernel, initramfs or grub.cfg are still missing.
+ensure_bootable() {
+  if [[ ! -s "$TARGET/boot/grub/grub.cfg" ]]; then
+    warn "grub.cfg missing after the bootstrap — generating it now"
+    arch-chroot "$TARGET" mkinitcpio -P >/dev/null 2>&1 || warn "mkinitcpio -P reported errors"
+    arch-chroot "$TARGET" grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 || true
+  fi
+  local f
+  for f in boot/vmlinuz-linux-cachyos-server boot/initramfs-linux-cachyos-server.img boot/grub/grub.cfg efi/EFI/BOOT/BOOTX64.EFI; do
+    [[ -s "$TARGET/$f" ]] || die "target is not bootable: /$f is missing"
+  done
+  grep -q 'linux-cachyos-server' "$TARGET/boot/grub/grub.cfg" || die "target is not bootable: grub.cfg has no cachyos-server entry"
+}
+
 #--- bootstrap in chroot ---------------------------------------------------------------
 run_bootstrap() {
   log "Running arch-server-bootstrap inside the chroot (this takes a while)"
@@ -283,6 +300,8 @@ run_bootstrap() {
   else
     warn "home directory for ${CFG[USER]} not found; SSH keys not installed"
   fi
+
+  ensure_bootable
 
   install -Dm644 "$ARCHCLOUD_TEMPLATES/arch-server-bootstrap-finish.service" \
     "$TARGET/etc/systemd/system/arch-server-bootstrap-finish.service"

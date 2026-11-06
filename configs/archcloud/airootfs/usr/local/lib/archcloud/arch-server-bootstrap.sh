@@ -406,7 +406,18 @@ real_user=$(getent passwd 1000 | cut -d: -f1 || true)
 #==============================================================================
 if should_run base; then
   begin_step base "Refreshing keyring and base tooling"
-  pacman -Sy --noconfirm archlinux-keyring || die "keyring refresh failed"
+  # CachyOS mirrors occasionally serve a db whose signature belongs to another
+  # sync ("signature ... is invalid"): retry with a forced refresh before giving up.
+  base_synced=false
+  for attempt in 1 2 3 4; do
+    if { [[ $attempt -eq 1 ]] && pacman -Sy --noconfirm archlinux-keyring; } \
+       || { [[ $attempt -gt 1 ]] && pacman -Syy --noconfirm archlinux-keyring; }; then
+      base_synced=true; break
+    fi
+    warn "package database sync failed (attempt $attempt/4) — retrying in $((attempt * 10))s"
+    sleep $((attempt * 10))
+  done
+  [[ "$base_synced" == "true" ]] || die "keyring refresh failed"
   pacman -S  --noconfirm --needed base-devel git wget curl tar jq || die "base tooling failed"
   mark_done base
   RAN+=("base")
