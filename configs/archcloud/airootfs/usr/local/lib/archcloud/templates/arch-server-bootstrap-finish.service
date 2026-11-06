@@ -1,0 +1,21 @@
+# Installed by archcloud. Runs arch-server-bootstrap once, natively, on the
+# first boot after installation: steps that could not complete inside the
+# installer's chroot (mirror ranking, LazyVim plugin sync, anything that
+# warned) finish here. Idempotent markers make every other step a no-op.
+[Unit]
+Description=Finish arch-server-bootstrap after the first boot
+ConditionPathExists=!/var/lib/arch-server-bootstrap/.finished
+After=network-online.target time-sync.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=UNATTENDED=1
+ExecStart=/usr/local/sbin/arch-server-bootstrap --unattended
+ExecStartPost=/usr/bin/touch /var/lib/arch-server-bootstrap/.finished
+ExecStartPost=/usr/bin/systemctl --no-block disable arch-server-bootstrap-finish.service
+StandardOutput=journal+console
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+# /etc/gitconfig — installed by arch-server-bootstrap (archcloud).
+# delta as the pager, difftastic through git dft / dlog / dshow.
+# Per-user ~/.gitconfig overrides anything here.
+[core]
+	pager = delta
+[interactive]
+	diffFilter = delta --color-only
+[delta]
+	navigate = true
+[diff]
+	colorMoved = default
+[merge]
+	conflictStyle = zdiff3
+[alias]
+	dft = -c diff.external=difft diff
+	dlog = -c diff.external=difft log --ext-diff -p
+	dshow = -c diff.external=difft show --ext-diff
+[init]
+	defaultBranch = main

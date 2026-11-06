@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+#
+# archcloud-seed — locate and use the optional seed volume.
+#
+# A seed is any block device (virtual CD, USB, extra disk) whose filesystem is
+# labelled ARCHCLOUD (or the cloud-init style CIDATA) and may contain:
+#   install.conf        shell assignments overriding /etc/archcloud/install.conf
+#   authorized_keys     extra public keys for the live root AND the target user
+#   network/*.network   systemd-networkd files copied into the installed system
+#
+#   archcloud-seed find        print the seed device, exit 1 when there is none
+#   archcloud-seed mount       mount it read-only at /run/archcloud/seed, print path
+#   archcloud-seed apply-live  (boot, before sshd) merge authorized_keys into the
+#                              live root account and apply HOSTNAME to the live env
+set -Eeuo pipefail
+
+SEED_MNT=/run/archcloud/seed
+
+find_seed() {
+  local label dev
+  for label in ARCHCLOUD archcloud CIDATA cidata; do
+    if dev=$(blkid -L "$label" 2>/dev/null) && [[ -n "$dev" ]]; then
+      printf '%s\n' "$dev"; return 0
+    fi
+  done
+  return 1
+}
+
+mount_seed() {
+  local dev
+  dev=$(find_seed) || return 1
+  mkdir -p "$SEED_MNT"
+  mountpoint -q "$SEED_MNT" || mount -o ro "$dev" "$SEED_MNT"
+  printf '%s\n' "$SEED_MNT"
+}
+
+# Read one KEY="value" assignment from a conf file without executing it.
+conf_get() {
+  local file="$1" key="$2"
+  sed -n -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*[\"']?([^\"']*)[\"']?[[:space:]]*$/\1/p" "$file" | tail -n1
+}
+
+apply_live() {
+  local mnt keyfile line added=0 hn
+  mnt=$(mount_seed) || { echo "archcloud-seed: no seed volume present"; return 0; }
+  echo "archcloud-seed: using $(findmnt -no SOURCE "$mnt") at $mnt"
+
+  if [[ -f "$mnt/authorized_keys" ]]; then
+    keyfile=/root/.ssh/authorized_keys
+    install -d -m700 /root/.ssh
+    touch "$keyfile"; chmod 600 "$keyfile"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      grep -qxF -- "$line" "$keyfile" || { printf '%s\n' "$line" >> "$keyfile"; added=$((added+1)); }
+    done < "$mnt/authorized_keys"
+    echo "archcloud-seed: $added key(s) added to $keyfile"
+  fi
+
+  if [[ -f "$mnt/install.conf" ]]; then
+    hn=$(conf_get "$mnt/install.conf" HOSTNAME)
+    if [[ -n "$hn" ]]; then
+      printf '%s\n' "$hn" > /etc/hostname
+      hostname "$hn" 2>/dev/null || true
+      echo "archcloud-seed: live hostname set to $hn"
+    fi
+  fi
+}
+
+case "${1:-}" in
+  find)       find_seed ;;
+  mount)      mount_seed ;;
+  apply-live) apply_live ;;
+  *) sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

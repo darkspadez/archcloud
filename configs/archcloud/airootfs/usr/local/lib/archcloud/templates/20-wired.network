@@ -1,0 +1,22 @@
+# Installed by archcloud: DHCPv4 + IPv6 router advertisements on every wired
+# interface. Put provider-specific static config (e.g. a static IPv6 block) in
+# an additional /etc/systemd/network/*.network file via the seed volume.
+[Match]
+Name=en* eth*
+Kind=!*
+
+[Link]
+RequiredForOnline=routable
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
+IPv6PrivacyExtensions=no
+MulticastDNS=no
+
+[DHCPv4]
+UseDomains=yes
+RouteMetric=100
+
+[IPv6AcceptRA]
+RouteMetric=100

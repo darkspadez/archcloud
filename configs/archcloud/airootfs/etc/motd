@@ -1,0 +1,11 @@
+
+  archcloud — Arch Linux / CachyOS unattended cloud installer
+
+  The installer runs automatically in a tmux session named "archcloud".
+    attach:   tmux attach -t archcloud        abort:  archcloud-install abort
+    manual:   archcloud-install [--dry-run]   config: /etc/archcloud/install.conf
+
+  Overrides: kernel cmdline archcloud.<key>=<value>  or a volume labelled
+  ARCHCLOUD / CIDATA holding install.conf, authorized_keys, network/*.network
+  Booted with archcloud.autoinstall=no: nothing touches the disk.
+

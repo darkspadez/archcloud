@@ -1,0 +1,17 @@
+[Unit]
+Description=archcloud: unattended installer (tmux session "archcloud")
+ConditionKernelCommandLine=!archcloud.autoinstall=no
+After=network-online.target sshd.service pacman-init.service archcloud-seed.service time-sync.target
+Wants=network-online.target sshd.service pacman-init.service
+
+[Service]
+Type=forking
+Environment=TERM=linux
+# archcloud-install writes its own log (/run/archcloud/install.log).
+ExecStart=/usr/bin/tmux -L archcloud new-session -d -s archcloud -x 120 -y 40 \
+  "/usr/local/bin/archcloud-install --auto; echo; echo '[archcloud] installer exited; press Enter for a shell'; read -r; exec /usr/bin/zsh -l"
+ExecStartPre=/usr/bin/mkdir -p /run/archcloud
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

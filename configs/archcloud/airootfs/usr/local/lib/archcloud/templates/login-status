@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# login-status — installed by arch-server-bootstrap (archcloud); ported from
+# fedora-cli-setup.sh to pacman.
+# Live: uptime, memory, disk, network, failed units, reboot-needed.
+# Cached (root collector, every 5 min): updates, containers, backup, crowdsec, ssh, netbird.
+CACHE=/var/cache/login-status/status.env
+CONF=/etc/login-status.conf
+HIDE=""
+# shellcheck disable=SC1090
+[[ -r $CONF ]] && . "$CONF"
+# shellcheck disable=SC1090
+[[ -r $CACHE ]] && . "$CACHE"
+
+if [[ -t 1 ]]; then
+  B=$'\e[1m' D=$'\e[2m' C=$'\e[36m' G=$'\e[32m' Y=$'\e[33m' R=$'\e[31m' N=$'\e[0m'
+else
+  B='' D='' C='' G='' Y='' R='' N=''
+fi
+
+hidden() { [[ " ${HIDE,,} " == *" ${1,,} "* ]]; }
+row()    { hidden "$1" || printf ' %s%-9s%s %s\n' "$C" "$1" "$N" "$2"; }
+commas() { sed ':a;s/\B[0-9]\{3\}\>/,&/;ta' <<<"$1"; }
+ago() {
+  local s=$(( $(date +%s) - $1 ))
+  if   (( s < 90 ));     then echo "just now"
+  elif (( s < 5400 ));   then echo "$(( s / 60 ))m ago"
+  elif (( s < 172800 )); then echo "$(( s / 3600 ))h ago"
+  else                        echo "$(( s / 86400 ))d ago"; fi
+}
+
+# --- header -------------------------------------------------------------------
+# shellcheck disable=SC1091
+. /etc/os-release
+host=$(cat /etc/hostname 2>/dev/null || uname -n); host=${host%%.*}
+printf '\n %s%s%s %s·%s %s %s·%s %s %s· as of %s%s\n' \
+  "$B" "$host" "$N" "$D" "$N" "${NAME:-Linux}" \
+  "$D" "$N" "$(uname -r)" "$D" "$(date +%H:%M)" "$N"
+
+# --- uptime / load --------------------------------------------------------------
+cpus=$(nproc)
+read -r l1 l5 l15 _ < /proc/loadavg
+lc=$N; awk -v l="$l1" -v c="$cpus" 'BEGIN{exit !(l>c)}' && lc=$Y
+row Uptime "$(uptime -p | sed 's/^up //')   ${D}load${N} ${lc}${l1}${N} $l5 $l15 ${D}(${cpus} cpu)${N}"
+
+# --- memory -----------------------------------------------------------------------
+read -r mt mu < <(free -h | awk '/^Mem:/{print $2, $3}')
+read -r st su < <(free -h | awk '/^Swap:/{print $2, $3}')
+if [[ -z $st || $st == 0B ]]; then swap="${D}swap${N} none"; else swap="${D}swap${N} $su / $st"; fi
+row Memory "$mu / $mt   $swap"
+
+# --- disk -----------------------------------------------------------------------
+read -r du ds dp < <(df -h --output=used,size,pcent / | tail -n1)
+p=${dp%\%}; dc=$D; (( p >= 80 )) && dc=$Y; (( p >= 90 )) && dc=$R
+row Disk "$du / $ds ${dc}(${dp})${N}"
+
+# --- network ----------------------------------------------------------------------
+v4=$(ip -o -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+')
+v6=$(ip -o -6 route get 2606:4700:4700::1111 2>/dev/null | grep -oP 'src \K\S+')
+row Network "${v4:-${D}no ipv4${N}}${v6:+   $v6}"
+
+# --- updates + reboot -------------------------------------------------------------
+# A kernel upgrade removes the running kernel's module directory: reboot needed.
+reboot=""
+[[ -d /usr/lib/modules/$(uname -r) ]] || reboot="   ${R}reboot needed${N} ${D}(kernel updated)${N}"
+if [[ -n ${UPD_TS:-} ]]; then
+  if (( UPD_COUNT == 0 )); then u="${G}up to date${N}"
+  else u="${Y}${UPD_COUNT} pending${N} ${D}(pacman -Syu)${N}"; fi
+  row Updates "$u ${D}checked $(ago "$UPD_TS")${N}$reboot"
+else
+  row Updates "${D}not checked yet${N}$reboot"
+fi
+
+# --- systemd ------------------------------------------------------------------------
+mapfile -t failed < <(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}')
+if (( ${#failed[@]} == 0 )); then row Services "${G}all running${N}"
+else row Services "${R}${#failed[@]} failed${N} ${D}${failed[*]}${N}"; fi
+
+# --- containers -------------------------------------------------------------------
+if [[ -n ${CTR_ENGINE:-} ]]; then
+  label=${CTR_ENGINE^}
+  if [[ -n ${CTR_ERR:-} ]]; then row "$label" "${R}not responding${N}"
+  elif (( CTR_UNHEALTHY > 0 )); then row "$label" "$CTR_RUNNING running ${R}${CTR_UNHEALTHY} unhealthy${N}"
+  else row "$label" "$CTR_RUNNING running ${G}all healthy${N}"; fi
+fi
+
+# --- backup (BACKUP_CHECK_CMD in /etc/login-status.conf) --------------------------
+if [[ -n ${BACKUP_TS:-} ]]; then
+  # shellcheck disable=SC2153  # BACKUP_RC comes from the sourced cache file
+  if (( BACKUP_RC == 0 )); then bc=$G; else bc=$R; fi
+  row Backup "${bc}${BACKUP_LINE:-?}${N} ${D}checked $(ago "$BACKUP_TS")${N}"
+fi
+
+# --- snapshots (snapper root config) ----------------------------------------------
+if [[ -n ${SNAP_COUNT:-} ]]; then
+  row Snapshots "$SNAP_COUNT ${D}(snapper root${SNAP_LAST:+, last $SNAP_LAST})${N}"
+fi
+
+# --- crowdsec -----------------------------------------------------------------------
+if [[ -n ${CS_BANNED:-} ]]; then
+  case ${CS_FW:-} in
+    active) fw="${G}firewall on${N}" ;; absent) fw="${D}no bouncer${N}" ;; *) fw="${R}firewall off${N}" ;;
+  esac
+  row CrowdSec "$CS_BANNED banned ${D}·${N} $(commas "$CS_BLOCKLIST") blocklisted   $fw"
+fi
+
+# --- ssh ------------------------------------------------------------------------------
+if [[ -n ${SSH_FAILS:-} ]]; then
+  if (( SSH_FAILS == 0 )); then row SSH "${G}no failed logins${N} ${D}(24h)${N}"
+  else row SSH "$(commas "$SSH_FAILS") failed logins from $(commas "$SSH_IPS") IPs ${D}(24h)${N}"; fi
+fi
+
+# --- netbird ----------------------------------------------------------------------------
+if [[ -n ${NB_TOTAL:-} ]]; then
+  if [[ ${NB_MGMT:-true} != true ]]; then nb=" ${R}management disconnected${N}"; else nb=""; fi
+  row NetBird "${NB_CONNECTED}/${NB_TOTAL} peers connected$nb"
+fi
+
+# --- stale cache warning ------------------------------------------------------------
+if [[ -n ${COLLECTED_TS:-} ]] && (( $(date +%s) - COLLECTED_TS > 1800 )); then
+  printf ' %scached status is %s — check login-status-collect.timer%s\n' "$Y" "$(ago "$COLLECTED_TS")" "$N"
+fi
+echo
