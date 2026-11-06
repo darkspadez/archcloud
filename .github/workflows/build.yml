@@ -55,6 +55,7 @@ jobs:
           df -h /
       - name: Rename checksum file per variant
         run: |
+          sudo chown -R "$(id -u):$(id -g)" out     # written by root inside the build container
           cd out
           mv sha256sums "sha256sums-${{ matrix.level }}.txt"
           cat "sha256sums-${{ matrix.level }}.txt" metrics.txt
