@@ -1,6 +1,5 @@
 # Installed by archcloud. Regenerates Limine's entries after kernels, microcode
-# or limine itself change. Sorts after mkinitcpio's 90-mkinitcpio-install.hook,
-# which installs the kernel and builds the initramfs into /boot.
+# or limine itself change. Sorts after mkinitcpio and zz-snap-pac-post so the new snapshot is listed.
 [Trigger]
 Type = Path
 Operation = Install

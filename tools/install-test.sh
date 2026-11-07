@@ -102,6 +102,10 @@ assert_installed() { # FW
   r 'sudo awk "/^\\/Arch Linux/{print; exit}" /boot/limine/limine.conf | grep -q cachyos-server' || tdie "[$fw] the first (default) Limine entry is not cachyos-server"
   r 'sudo test -s /boot/EFI/BOOT/BOOTX64.EFI && sudo test -s /boot/limine/limine-bios.sys' || tdie "[$fw] Limine binaries missing from the ESP"
   tok "[$fw] Limine config + both kernels present"
+  r 'sudo snapper --no-dbus -c root create -d citest-snap >/dev/null && sudo /usr/local/sbin/limine-update >/dev/null' || tdie "[$fw] snapshot + limine-update failed"
+  r 'sudo grep -q "citest-snap" /boot/limine/limine.conf && sudo grep -q "rootflags=subvol=/@snapshots/" /boot/limine/limine.conf' || tdie "[$fw] no Limine entry for the new snapshot"
+  r 'sudo test -s /boot/snapshots/linux-cachyos-server/$(uname -r)/initramfs.img' || tdie "[$fw] kernel not archived for snapshot booting"
+  tok "[$fw] snapshot boot entry generated + kernel archived"
 
   tlog "[$fw] waiting for arch-server-bootstrap-finish (up to ${FINISH_TIMEOUT}s)"
   local t0; t0=$(date +%s)

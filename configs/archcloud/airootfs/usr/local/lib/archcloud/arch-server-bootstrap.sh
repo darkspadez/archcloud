@@ -1396,7 +1396,7 @@ if should_run bootloader; then
   if [[ ! -x /usr/local/sbin/limine-update ]]; then
     if [[ -f "$TEMPLATE_DIR/limine-update" ]]; then
       install -Dm755 "$TEMPLATE_DIR/limine-update" /usr/local/sbin/limine-update
-      install -Dm644 "$TEMPLATE_DIR/95-limine-update.hook" /etc/pacman.d/hooks/95-limine-update.hook
+      install -Dm644 "$TEMPLATE_DIR/zzz-limine-update.hook" /etc/pacman.d/hooks/zzz-limine-update.hook
       [[ -e /etc/default/limine-update ]] || install -Dm644 "$TEMPLATE_DIR/limine-update.conf" /etc/default/limine-update
     else
       warn "limine-update template missing — cannot configure the bootloader."; bl_ok=false

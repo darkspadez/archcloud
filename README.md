@@ -85,16 +85,12 @@ GPT: 1 MiB BIOS boot partition, 2 GiB FAT32 ESP mounted at `/boot`, btrfs root (
 (it reads only FAT, hence kernels and initramfs on the ESP). `limine-update` (run by a pacman hook
 after kernel/microcode/limine changes) writes `/boot/limine/limine.conf` with
 `linux-cachyos-server` first and stock `linux` as fallback. Serial console enabled.
-Note: kernels live outside btrfs, so snapper snapshots do not include them and there is no
-snapshot boot menu; a rollback across a kernel upgrade needs the matching kernel reinstalled.
-`pacstrap` from the CachyOS repos at the probed level (`linux-cachyos-server` + headers, stock
-`linux` fallback, `linux-firmware`, guest agent for the detected hypervisor, snapper,
-zram-generator, ...). systemd-networkd (DHCPv4 + IPv6 RA on `en*`/`eth*`) + systemd-resolved.
-Then [`arch-server-bootstrap.sh`](configs/archcloud/airootfs/usr/local/lib/archcloud/arch-server-bootstrap.sh)
-runs inside `arch-chroot` (chroot-aware patch of `refs/arch-server-bootstrap.sh`: services are
-enabled but not started, `snapper --no-dbus`, SSH host keys generated before `sshd -t`, all tunables
-from the environment), and a oneshot finisher re-runs it natively on first boot. The script stays on
-the box as `/usr/local/sbin/arch-server-bootstrap` for later re-runs (`--status`, `--only ...`).
+Snapshot booting: Limine cannot read btrfs, so `limine-update` archives each kernel+initramfs
+on the ESP (`/boot/snapshots/<pkg>/<release>/`) and lists the newest `SNAPSHOT_LIMIT` (10)
+snapper snapshots under a *Snapshots* menu, booted **read-only** via `rootflags=subvol=/@snapshots/N/snapshot`.
+A snapshot only appears if the kernel it contains was archived; unreferenced archives are pruned.
+Entries refresh after every pacman transaction and snapper cleanup. For a writable boot use the
+snapshot to inspect/recover, then `snapper rollback`.
 
 ## Building
 

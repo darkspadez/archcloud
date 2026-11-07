@@ -238,8 +238,9 @@ EOF
   # into the bios-boot partition (#1).
   log "Installing Limine for BIOS and UEFI"
   install -Dm755 "$ARCHCLOUD_TEMPLATES/limine-update" "$TARGET/usr/local/sbin/limine-update"
-  install -Dm644 "$ARCHCLOUD_TEMPLATES/95-limine-update.hook" "$TARGET/etc/pacman.d/hooks/95-limine-update.hook"
+  install -Dm644 "$ARCHCLOUD_TEMPLATES/zzz-limine-update.hook" "$TARGET/etc/pacman.d/hooks/zzz-limine-update.hook"
   install -Dm644 "$ARCHCLOUD_TEMPLATES/limine-update.conf" "$TARGET/etc/default/limine-update"
+  install -Dm644 "$ARCHCLOUD_TEMPLATES/limine-update-snapper.conf" "$TARGET/etc/systemd/system/snapper-cleanup.service.d/limine-update.conf"
   printf '%s 1\n' "$TARGET_DISK" > "$TARGET/etc/limine-bios-install"
   arch-chroot "$TARGET" mkinitcpio -P >/dev/null 2>&1 || warn "mkinitcpio -P reported errors"
   arch-chroot "$TARGET" /usr/local/sbin/limine-update --bios

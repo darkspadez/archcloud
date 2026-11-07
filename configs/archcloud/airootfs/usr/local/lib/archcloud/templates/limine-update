@@ -20,6 +20,9 @@ FSTAB=${LIMINE_FSTAB:-/etc/fstab}
 TIMEOUT=3
 EXTRA_CMDLINE="loglevel=3"
 SERIAL=yes
+SNAPSHOT_BOOT=yes
+SNAPSHOT_LIMIT=10
+SNAPDIR=${LIMINE_SNAPDIR:-/.snapshots}
 # shellcheck disable=SC1091
 [[ -r /etc/default/limine-update ]] && . /etc/default/limine-update
 
@@ -98,3 +101,52 @@ tmp=$(mktemp "$BOOT/limine/.limine.conf.XXXXXX")
 grep -q '^/Arch Linux' "$tmp" || { rm -f "$tmp"; die "no bootable entry could be generated"; }
 chmod 644 "$tmp"; mv -f "$tmp" "$BOOT/limine/limine.conf"
 say "wrote $BOOT/limine/limine.conf ($(grep -c '^/Arch Linux' "$BOOT/limine/limine.conf") entries; kernels: ${kernels[*]})"
+
+# --- snapshot boot entries -----------------------------------------------------------------
+# Limine cannot read btrfs, so each kernel+initramfs pair is archived on the ESP under
+# snapshots/<pkgbase>/<release>/ and a snapshot only gets an entry when the archive for
+# the kernel it contains exists. Archives nobody references are pruned.
+if [[ "$SNAPSHOT_BOOT" == yes ]]; then
+  declare -A needed=()
+  for m in /usr/lib/modules/*/; do
+    rel=$(basename "$m"); base=$(cat "$m/pkgbase" 2>/dev/null || true)
+    [[ -n "$base" && -f "$BOOT/vmlinuz-$base" && -f "$BOOT/initramfs-$base.img" ]] || continue
+    dst="$BOOT/snapshots/$base/$rel"; needed["$base/$rel"]=1
+    [[ -f "$dst/vmlinuz" && -f "$dst/initramfs.img" ]] && continue
+    install -d "$dst"; cp "$BOOT/vmlinuz-$base" "$dst/vmlinuz"; cp "$BOOT/initramfs-$base.img" "$dst/initramfs.img"
+    say "archived $base $rel for snapshot booting"
+  done
+  snaps=()
+  if [[ -d "$SNAPDIR" ]]; then
+    mapfile -t snaps < <(find "$SNAPDIR" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -printf '%f\n' 2>/dev/null | sort -rn | head -n "$SNAPSHOT_LIMIT")
+  fi
+  snap_entries=""
+  for n in "${snaps[@]}"; do
+    root="$SNAPDIR/$n/snapshot"; [[ -d "$root/usr/lib/modules" ]] || continue
+    pick=""
+    for m in "$root"/usr/lib/modules/*/; do
+      rel=$(basename "$m"); base=$(cat "$m/pkgbase" 2>/dev/null || true)
+      [[ -n "$base" && -f "$BOOT/snapshots/$base/$rel/vmlinuz" ]] || continue
+      [[ -z "$pick" || "$base" == linux-cachyos-server ]] && pick="$base/$rel"
+    done
+    [[ -n "$pick" ]] || continue
+    needed["$pick"]=1
+    info="$SNAPDIR/$n/info.xml"
+    desc=$(sed -n 's|.*<description>\(.*\)</description>.*|\1|p' "$info" 2>/dev/null | head -n1 | tr -d '\n#/')
+    date=$(sed -n 's|.*<date>\(.*\)</date>.*|\1|p' "$info" 2>/dev/null | head -n1 | cut -c1-16)
+    snap_entries+="    //#$n $date ${desc:-snapshot} (${pick#*/})"$'\n'
+    snap_entries+="        protocol: linux"$'\n'"        path: boot():/snapshots/$pick/vmlinuz"$'\n'
+    snap_entries+="        cmdline: root=$root_spec ro rootflags=subvol=/@snapshots/$n/snapshot${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}"$'\n'
+    for u in "${ucode[@]}"; do snap_entries+="        module_path: boot():/$u"$'\n'; done
+    snap_entries+="        module_path: boot():/snapshots/$pick/initramfs.img"$'\n'
+  done
+  if [[ -n "$snap_entries" ]]; then
+    { echo "/Snapshots (read-only)"; printf '%s' "$snap_entries"; } >> "$BOOT/limine/limine.conf"
+    say "added $(grep -c '^    //' "$BOOT/limine/limine.conf") snapshot entries"
+  fi
+  for dir in "$BOOT"/snapshots/*/*/; do
+    [[ -d "$dir" ]] || continue
+    key=$(basename "$(dirname "$dir")")/$(basename "$dir")
+    [[ -n "${needed[$key]:-}" ]] || { rm -rf "$dir"; say "pruned unreferenced kernel archive $key"; }
+  done
+fi
