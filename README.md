@@ -71,7 +71,7 @@ and can be overridden, highest priority first:
 | `PASSWORD_HASH` | empty (locked) | crypt(3) hash for the user: `openssl passwd -6` / `mkpasswd -m sha-512` |
 | `TIMEZONE` / `LOCALE` / `KEYMAP` | `America/New_York` / `en_US.UTF-8` / `us` | |
 | `CACHYOS_LEVEL` | `auto` | repo level for the installed system: `auto\|generic\|v3\|v4\|znver4` |
-| `KEEP_STOCK_KERNEL` | `true` | keep `linux` as a GRUB fallback next to `linux-cachyos-server` |
+| `KEEP_STOCK_KERNEL` | `true` | keep `linux` as a Limine fallback entry next to `linux-cachyos-server` |
 | `INSTALL_LAZYVIM` | `true` | LazyVim starter for root + user |
 | `COUNTDOWN` / `REBOOT` / `AUTOINSTALL` / `FORCE` | `30` / `yes` / `yes` / `no` | installer behaviour |
 
@@ -80,11 +80,15 @@ Manual use from the rescue shell or over SSH: `archcloud-install --dry-run`, `ar
 
 ## What the installer does
 
-GPT: 1 MiB BIOS boot partition, 1 GiB ESP mounted at `/efi`, btrfs root (`@`, `@home`,
-`@snapshots`, `@var_log`, `@pkg`; `compress=zstd:1,noatime`). `/boot` lives inside `@` so
-snapshots include kernels. Hybrid GRUB for BIOS **and** UEFI, serial console enabled.
+GPT: 1 MiB BIOS boot partition, 2 GiB FAT32 ESP mounted at `/boot`, btrfs root (`@`, `@home`,
+`@snapshots`, `@var_log`, `@pkg`; `compress=zstd:1,noatime`). **Limine** boots both BIOS and UEFI
+(it reads only FAT, hence kernels and initramfs on the ESP). `limine-update` (run by a pacman hook
+after kernel/microcode/limine changes) writes `/boot/limine/limine.conf` with
+`linux-cachyos-server` first and stock `linux` as fallback. Serial console enabled.
+Note: kernels live outside btrfs, so snapper snapshots do not include them and there is no
+snapshot boot menu; a rollback across a kernel upgrade needs the matching kernel reinstalled.
 `pacstrap` from the CachyOS repos at the probed level (`linux-cachyos-server` + headers, stock
-`linux` fallback, `linux-firmware`, guest agent for the detected hypervisor, snapper/grub-btrfs,
+`linux` fallback, `linux-firmware`, guest agent for the detected hypervisor, snapper,
 zram-generator, ...). systemd-networkd (DHCPv4 + IPv6 RA on `en*`/`eth*`) + systemd-resolved.
 Then [`arch-server-bootstrap.sh`](configs/archcloud/airootfs/usr/local/lib/archcloud/arch-server-bootstrap.sh)
 runs inside `arch-chroot` (chroot-aware patch of `refs/arch-server-bootstrap.sh`: services are
@@ -119,7 +123,7 @@ build.sh                      container-aware build entry point
 tools/                        cachyos-host-setup, make-seed, boot-test, install-test, lint
 keys/cachyos-keyring.asc      CachyOS signing key (fpr 882DCFE48E2051D48E2562ABF3B607488DB35A47)
 configs/archcloud/            the archiso profile
-  profiledef.sh packages.x86_64 pacman.conf.in efiboot/ syslinux/ grub/
+  profiledef.sh packages.x86_64 pacman.conf.in efiboot/ syslinux/
   airootfs/etc/archcloud/install.conf          baked defaults
   airootfs/usr/local/bin/archcloud-install     the installer
   airootfs/usr/local/bin/archcloud-seed        seed volume helper
@@ -136,6 +140,6 @@ Boot the ISO with the `rescue shell` entry (or `archcloud.autoinstall=no`), SSH 
 
 ```sh
 mount -o subvol=@ /dev/disk/by-label/archcloud /mnt
-mount /dev/disk/by-partlabel/esp /mnt/efi    # plus @home etc. as needed
+mount /dev/disk/by-partlabel/esp /mnt/boot    # plus @home etc. as needed
 arch-chroot /mnt
 ```

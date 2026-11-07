@@ -244,9 +244,9 @@ EOF
 target_packages() {
   local pkgs=(
     base base-devel linux-cachyos-server linux-cachyos-server-headers linux-firmware
-    btrfs-progs grub efibootmgr dosfstools mkinitcpio sudo openssh zsh git curl jq tmux inetutils
+    btrfs-progs limine dosfstools mkinitcpio sudo openssh zsh git curl jq tmux inetutils
     cachyos-settings cachyos-keyring cachyos-mirrorlist cachyos-v3-mirrorlist cachyos-v4-mirrorlist
-    cachyos-rate-mirrors pacman-contrib zram-generator snapper snap-pac grub-btrfs inotify-tools
+    cachyos-rate-mirrors pacman-contrib zram-generator snapper snap-pac
   )
   [[ "${CFG[KEEP_STOCK_KERNEL]}" == true ]] && pkgs+=(linux)
   if grep -qE '^vendor_id\s*:\s*AuthenticAMD' /proc/cpuinfo; then pkgs+=(amd-ucode)

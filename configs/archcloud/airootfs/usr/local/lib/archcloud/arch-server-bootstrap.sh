@@ -15,8 +15,8 @@
 # Optional steps warn-and-continue instead of aborting the whole run.
 #
 #   - CachyOS repos + mirror ranking + cachyos-settings (system tuning)
-#   - CachyOS kernel (linux-cachyos-server), set as default on either
-#     systemd-boot or GRUB (auto-detected)
+#   - CachyOS kernel (linux-cachyos-server), set as the default boot entry in
+#     Limine (BIOS + UEFI; kernels on the FAT ESP at /boot)
 #   - Full system upgrade onto optimized CachyOS packages
 #   - Shelly (ALPM package manager)
 #   - Docker stack (engine, compose, buildx) with log rotation + live-restore
@@ -28,7 +28,7 @@
 #   - Guest agents: qemu-guest-agent / open-vm-tools / hyperv by hypervisor
 #   - Shell: modern-cli zsh wrappers + plugins, Pure, delta/difftastic git config,
 #            login-status screen, LazyVim (root + primary user)
-#   - Snapshots: snapper + snap-pac + grub-btrfs (Btrfs root; self-heals a
+#   - Snapshots: snapper + snap-pac (Btrfs root; self-heals a
 #                pre-existing @snapshots subvolume layout, with fstab-safety
 #                checks — no separate repair script needed)
 #   - Maintenance: informant (Arch news gate), paccache.timer (cache pruning)
@@ -55,11 +55,6 @@ set -uo pipefail   # NOTE: -e intentionally omitted; we control failure per-step
 
 #--- tunables -----------------------------------------------------------------
 KEEP_STOCK_KERNEL="${KEEP_STOCK_KERNEL:-true}"   # true = keep stock `linux` as a fallback boot entry
-
-# Bootloader for the kernel-default step. "auto" detects systemd-boot vs GRUB
-# (netcup boxes are systemd-boot/UEFI; the BIOS install guide produces GRUB).
-# Force with "systemd-boot" or "grub" if detection is ever ambiguous.
-BOOTLOADER="${BOOTLOADER:-auto}"
 
 # CachyOS ananicy-cpp auto-nice daemon + CachyOS priority rules. Desktop-
 # oriented (interactive responsiveness); off by default for servers.
@@ -165,7 +160,7 @@ declare -a RAN=() SKIPPED=() WARNED=()
 declare -A GROUP_STEPS=(
   [hostname]="hostname"
   [user]="create_user"
-  [cachyos]="cachyos_repo,cachyos_mirrors,upgrade,cachyos_settings,kernel,grub_default,shelly,ananicy"
+  [cachyos]="cachyos_repo,cachyos_mirrors,upgrade,cachyos_settings,kernel,bootloader,shelly,ananicy"
   [reliability]="reliability,locale_utf8"
   [ext4]="ext4_tuning"
   [adios]="adios"
@@ -274,7 +269,7 @@ cachyos_ready() { grep -qE '^\[cachyos(-v3|-v4|-znver4|-core|-extra)?' /etc/pacm
 #--- guards -------------------------------------------------------------------
 [[ $EUID -eq 0 ]] || die "Run as root."
 [[ -f /etc/arch-release ]] || die "Arch Linux only."
-# (No bootloader guard: the kernel-default step auto-detects systemd-boot vs GRUB.)
+# (No bootloader guard: the bootloader step installs/refreshes Limine itself.)
 mkdir -p "$STATE_DIR"
 
 #--- --status short-circuit ---------------------------------------------------
@@ -282,7 +277,7 @@ if [[ "${STATUS_ONLY:-false}" == "true" ]]; then
   echo "Bootstrap step status (markers in $STATE_DIR):"
   for s in hostname create_user base cachyos_repo cachyos_mirrors upgrade cachyos_settings kernel shelly ananicy docker reliability locale_utf8 ext4_tuning \
            adios bbr guest_agents qol_tools golang flow_sshs zsh_shell zsh_config pure_install modern_cli gitconfig login_status lazyvim \
-           maintenance ssh_keys snapshots grub_default; do
+           maintenance ssh_keys snapshots bootloader; do
     if is_done "$s"; then printf '  [x] %-16s (%s)\n' "$s" "$(cat "$(done_marker "$s")")"
     else printf '  [ ] %-16s\n' "$s"; fi
   done
@@ -1307,7 +1302,7 @@ CONF
   mark_done ssh_keys; RAN+=("ssh_keys")
 fi
 #==============================================================================
-# 15. snapshots — snapper + snap-pac + grub-btrfs, with self-healing config
+# 15. snapshots — snapper + snap-pac, with self-healing config
 #==============================================================================
 if should_run snapshots; then
   root_fs=$(findmnt -no FSTYPE /)
@@ -1315,8 +1310,8 @@ if should_run snapshots; then
     warn "Root fs is '$root_fs', not btrfs — skipping snapshots (not applicable)."
     mark_done snapshots   # mark so re-runs don't keep checking
   else
-    begin_step snapshots "Installing snapper + snap-pac + grub-btrfs (Btrfs root)"
-    pacman -S --noconfirm --needed snapper snap-pac grub-btrfs inotify-tools \
+    begin_step snapshots "Installing snapper + snap-pac (Btrfs root)"
+    pacman -S --noconfirm --needed snapper snap-pac \
       || warn "snapshot package install hit an error (continuing)"
 
     # --- self-healing snapper 'root' config ---
@@ -1376,7 +1371,6 @@ if should_run snapshots; then
       # Disable periodic timeline snapshots (desktop-oriented); keep snap-pac.
       sc_disable_now snapper-timeline.timer 2>/dev/null || true
       sc_enable_now snapper-cleanup.timer  2>/dev/null || warn "cleanup.timer enable failed"
-      sc_enable_now grub-btrfsd.service    2>/dev/null || warn "grub-btrfsd enable failed"
       # Verify with a test snapshot (only if none exist yet).
       if ! snapper_cmd -c root list 2>/dev/null | grep -qE '^[[:space:]]*[0-9]+'; then
         snapper_cmd -c root create -d "bootstrap verification" 2>/dev/null \
@@ -1391,156 +1385,36 @@ if should_run snapshots; then
 fi
 
 #==============================================================================
-# 16. bootloader: regenerate initramfs + set linux-cachyos-server as default.
-#     Auto-detects systemd-boot vs GRUB (BOOTLOADER tunable can force either).
+# 16. bootloader: Limine (BIOS + UEFI). Kernels/initramfs live on the FAT ESP
+#     mounted at /boot; limine-update writes limine.conf with linux-cachyos-server
+#     first (and stock linux as fallback) and deploys the Limine binaries.
 #==============================================================================
-if should_run grub_default; then
-  begin_step grub_default "Regenerating initramfs + pinning CachyOS kernel default"
-  mkinitcpio -P || warn "mkinitcpio reported an error (continuing)"
-
-  # --- detect bootloader ---
-  detect_bootloader() {
-    case "$BOOTLOADER" in
-      systemd-boot|grub) echo "$BOOTLOADER"; return ;;
-    esac
-    # auto: systemd-boot reports itself via bootctl; confirm it's the live loader.
-    if command -v bootctl >/dev/null 2>&1 \
-       && bootctl status 2>/dev/null | grep -qiE 'Current Boot Loader:.*systemd-boot'; then
-      echo "systemd-boot"; return
-    fi
-    # Fallback: a populated loader/entries dir + ESP also indicates systemd-boot.
-    if [[ -d /boot/loader/entries ]] && compgen -G "/boot/loader/entries/*.conf" >/dev/null; then
-      echo "systemd-boot"; return
-    fi
-    # Otherwise assume GRUB if its config exists.
-    if [[ -f /boot/grub/grub.cfg ]] || command -v grub-mkconfig >/dev/null 2>&1; then
-      echo "grub"; return
-    fi
-    echo "unknown"
-  }
-  bl=$(detect_bootloader)
-  log "Bootloader detected: $bl"
-
-  pinned=false
-
-  #--------------------------------------------------------------------------
-  if [[ "$bl" == "systemd-boot" ]]; then
-  #--------------------------------------------------------------------------
-    ENTRY_DIR=/boot/loader/entries
-    LOADER_CONF=/boot/loader/loader.conf
-    CACHY_ENTRY="cachyos-server.conf"
-    cachy_vmlinuz="/vmlinuz-linux-cachyos-server"
-    cachy_initrd="/initramfs-linux-cachyos-server.img"
-
-    # Confirm the kernel files actually exist on the ESP/boot.
-    if [[ ! -f "/boot${cachy_vmlinuz}" || ! -f "/boot${cachy_initrd}" ]]; then
-      warn "CachyOS kernel/initramfs not found in /boot — cannot create entry. NOT marking done."
+if should_run bootloader; then
+  begin_step bootloader "Regenerating initramfs + Limine entries (CachyOS kernel default)"
+  bl_ok=true
+  # The installer normally installed these already; make standalone runs work too.
+  if [[ ! -x /usr/local/sbin/limine-update ]]; then
+    if [[ -f "$TEMPLATE_DIR/limine-update" ]]; then
+      install -Dm755 "$TEMPLATE_DIR/limine-update" /usr/local/sbin/limine-update
+      install -Dm644 "$TEMPLATE_DIR/95-limine-update.hook" /etc/pacman.d/hooks/95-limine-update.hook
+      [[ -e /etc/default/limine-update ]] || install -Dm644 "$TEMPLATE_DIR/limine-update.conf" /etc/default/limine-update
     else
-      # Derive the kernel cmdline (options line) from an EXISTING entry so this
-      # works on any box without hardcoding root=PARTUUID. Prefer the stock
-      # linux entry; fall back to the first entry that has an options line.
-      opts=""
-      stock_entry=$(grep -lE '^[[:space:]]*linux[[:space:]]+/vmlinuz-linux([[:space:]]|$)' "$ENTRY_DIR"/*.conf 2>/dev/null | grep -v "$CACHY_ENTRY" | head -n1)
-      [[ -z "$stock_entry" ]] && stock_entry=$(grep -lE '^[[:space:]]*options[[:space:]]' "$ENTRY_DIR"/*.conf 2>/dev/null | grep -v "$CACHY_ENTRY" | head -n1)
-      [[ -n "$stock_entry" ]] && opts=$(grep -E '^[[:space:]]*options[[:space:]]' "$stock_entry" | head -n1 | sed -E 's/^[[:space:]]*options[[:space:]]+//')
-
-      if [[ -z "$opts" ]]; then
-        # Last-resort fallback: build from current /proc/cmdline (strip initrd=).
-        opts=$(sed -E 's/initrd=[^ ]+ *//g' /proc/cmdline)
-        warn "No existing options line found — derived cmdline from /proc/cmdline."
-      fi
-
-      # SAFETY: an empty options line produces an unbootable entry (no root=).
-      if [[ -z "${opts// /}" ]] || ! grep -qE 'root=' <<<"$opts"; then
-        warn "Refusing to write systemd-boot entry: kernel options empty or missing root=."
-        warn "Derived opts: '$opts'. Inspect existing entries in $ENTRY_DIR and set manually."
-      else
-        log "Using kernel options: $opts"
-        cat > "$ENTRY_DIR/$CACHY_ENTRY" <<EOF
-# Created by: arch-server-bootstrap
-title   Arch Linux (cachyos-server)
-linux   $cachy_vmlinuz
-initrd  $cachy_initrd
-options $opts
-EOF
-        log "Wrote systemd-boot entry: $ENTRY_DIR/$CACHY_ENTRY"
-
-        # Set it as default in loader.conf (idempotent: replace any default line).
-        touch "$LOADER_CONF"
-        if grep -qE '^[[:space:]]*default[[:space:]]' "$LOADER_CONF"; then
-          sed -i -E "s|^[[:space:]]*default[[:space:]]+.*|default $CACHY_ENTRY|" "$LOADER_CONF"
-        else
-          sed -i "1i default $CACHY_ENTRY" "$LOADER_CONF"
-        fi
-        # Ensure a sane timeout so the fallback menu is reachable.
-        grep -qE '^[[:space:]]*timeout[[:space:]]' "$LOADER_CONF" || echo 'timeout 3' >> "$LOADER_CONF"
-
-        # Verify: bootctl should list the entry, or loader.conf default is set.
-        if bootctl list 2>/dev/null | grep -qi 'cachyos-server'; then
-          log "Verified: bootctl sees the cachyos-server entry."
-          pinned=true
-        elif grep -qE "^[[:space:]]*default[[:space:]]+$CACHY_ENTRY" "$LOADER_CONF"; then
-          log "Verified: loader.conf default set to $CACHY_ENTRY."
-          pinned=true
-        else
-          warn "Could not verify systemd-boot default — inspect: bootctl list; cat $LOADER_CONF"
-        fi
-      fi
+      warn "limine-update template missing — cannot configure the bootloader."; bl_ok=false
     fi
-
-  #--------------------------------------------------------------------------
-  elif [[ "$bl" == "grub" ]]; then
-  #--------------------------------------------------------------------------
-    set_grub() {
-      grep -q "^$1=" /etc/default/grub \
-        && sed -i "s|^$1=.*|$1=$2|" /etc/default/grub \
-        || echo "$1=$2" >> /etc/default/grub
-    }
-    set_grub GRUB_DEFAULT saved
-    set_grub GRUB_SAVEDEFAULT false
-    set_grub GRUB_TIMEOUT 3
-    set_grub GRUB_TIMEOUT_STYLE menu
-
-    grub-mkconfig -o /boot/grub/grub.cfg || warn "grub-mkconfig reported an error"
-
-    sub_id=$(grep -E "^submenu " /boot/grub/grub.cfg \
-             | sed -nE "s/.*\\\$menuentry_id_option '([^']+)'.*/\1/p" | head -n1)
-    entry_id=$(grep -E "menuentry " /boot/grub/grub.cfg \
-               | grep "linux-cachyos-server" | grep -vi "fallback" \
-               | sed -nE "s/.*\\\$menuentry_id_option '([^']+)'.*/\1/p" | head -n1)
-
-    if [[ -n "$entry_id" ]]; then
-      if awk '/^submenu /{s=1} /linux-cachyos-server/ && s && !/fallback/{print "nested"; exit} /^}/{s=0}' \
-           /boot/grub/grub.cfg | grep -q nested; then
-        target="${sub_id}>${entry_id}"
-      else
-        target="$entry_id"
-      fi
-      grub-set-default "$target"
-      log "Default boot entry pinned to: $target"
-      if grep -q "saved_entry=${target}" /boot/grub/grubenv 2>/dev/null; then
-        log "Verified saved_entry in grubenv."
-        pinned=true
-      else
-        warn "grubenv saved_entry mismatch — verify: grep saved_entry /boot/grub/grubenv"
-      fi
+  fi
+  if [[ "$bl_ok" == "true" ]]; then
+    pacman -S --noconfirm --needed limine >/dev/null || { warn "limine install failed"; bl_ok=false; }
+  fi
+  if [[ "$bl_ok" == "true" ]]; then
+    mkinitcpio -P || warn "mkinitcpio reported an error (continuing)"
+    if /usr/local/sbin/limine-update && grep -q 'vmlinuz-linux-cachyos-server' /boot/limine/limine.conf; then
+      log "Verified: limine.conf lists linux-cachyos-server as the default entry."
     else
-      warn "linux-cachyos-server entry not found in grub.cfg."
-      warn "Inspect: grep -E 'menuentry |submenu ' /boot/grub/grub.cfg"
+      warn "limine-update failed or limine.conf lacks the cachyos-server entry."; bl_ok=false
     fi
-
-  #--------------------------------------------------------------------------
-  else
-  #--------------------------------------------------------------------------
-    warn "Bootloader could not be determined (BOOTLOADER=$BOOTLOADER, detect=$bl)."
-    warn "Set BOOTLOADER to 'systemd-boot' or 'grub' and re-run --only grub_default."
   fi
-
-  if [[ "$pinned" == "true" ]]; then
-    mark_done grub_default; RAN+=("grub_default")
-  else
-    warn "Kernel default NOT pinned — NOT marking done (will retry next run)."
-  fi
+  if [[ "$bl_ok" == "true" ]]; then mark_done bootloader; RAN+=("bootloader")
+  else warn "Bootloader not configured — NOT marking done (will retry next run)."; fi
 fi
 
 #==============================================================================
@@ -1555,9 +1429,9 @@ if [[ ${#WARNED[@]} -gt 0 ]]; then
   for w in "${WARNED[@]}"; do printf '    - %s\n' "$w"; done
 fi
 echo
-if is_done grub_default; then
+if is_done bootloader; then
   log "Provisioning complete. Reboot to land on linux-cachyos-server automatically."
 else
-  warn "grub_default not yet complete — kernel default NOT pinned. Re-run after resolving warnings."
+  warn "bootloader step not yet complete — kernel default NOT configured. Re-run after resolving warnings."
 fi
 log "Re-run anytime; completed steps are skipped. Use --status to inspect, --force to redo all."

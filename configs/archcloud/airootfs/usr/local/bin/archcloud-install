@@ -13,8 +13,8 @@
 #   archcloud-install status          show the installer log
 #   archcloud-install --version
 #
-# Layout: GPT → 1 MiB BIOS boot + 1 GiB ESP (/efi) + btrfs (@ @home @snapshots
-# @var_log @pkg). Hybrid GRUB (BIOS + UEFI). pacstrap from the CachyOS repos at
+# Layout: GPT → 1 MiB BIOS boot + 2 GiB ESP (/boot) + btrfs (@ @home @snapshots
+# @var_log @pkg). Limine for BIOS and UEFI (it reads only FAT, so the ESP is /boot). pacstrap from the CachyOS repos at
 # the probed CPU level, then arch-server-bootstrap runs inside arch-chroot and a
 # first-boot service finishes whatever needs a live system.
 set -Eeuo pipefail
@@ -107,7 +107,7 @@ print_plan() {
 $fps
   cachyos level   $CPU_LEVEL (target)   iso: $(cat /etc/archcloud/iso-level 2>/dev/null || echo '?')
   kernel          linux-cachyos-server$([[ "${CFG[KEEP_STOCK_KERNEL]}" == true ]] && echo " + linux (fallback)")
-  layout          GPT: 1M bios-boot | 1G ESP -> /efi | btrfs @ @home @snapshots @var_log @pkg
+  layout          GPT: 1M bios-boot | 2G ESP -> /boot (Limine) | btrfs @ @home @snapshots @var_log @pkg
   timezone        ${CFG[TIMEZONE]}   locale: ${CFG[LOCALE]}   keymap: ${CFG[KEYMAP]}
   lazyvim         ${CFG[INSTALL_LAZYVIM]}   reboot after: ${CFG[REBOOT]}   seed: ${SEED_DIR:-none}
  ────────────────────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ partition_and_format() {
   wipefs -af "$TARGET_DISK" >/dev/null
   sgdisk --zap-all "$TARGET_DISK" >/dev/null
   sgdisk -n1:0:+1MiB -t1:ef02 -c1:bios-boot \
-         -n2:0:+1GiB -t2:ef00 -c2:esp \
+         -n2:0:+2GiB -t2:ef00 -c2:esp \
          -n3:0:0     -t3:8304 -c3:"$ROOT_PARTLABEL" "$TARGET_DISK" >/dev/null
   partprobe "$TARGET_DISK" 2>/dev/null || true
   udevadm settle
@@ -175,12 +175,12 @@ partition_and_format() {
 
   local opts="compress=zstd:1,noatime,space_cache=v2,discard=async"
   mount -o "$opts,subvol=@" "$ROOT_DEV" "$TARGET"
-  mkdir -p "$TARGET"/{home,.snapshots,var/log,var/cache/pacman/pkg,efi}
+  mkdir -p "$TARGET"/{home,.snapshots,var/log,var/cache/pacman/pkg,boot}
   mount -o "$opts,subvol=@home"      "$ROOT_DEV" "$TARGET/home"
   mount -o "$opts,subvol=@snapshots" "$ROOT_DEV" "$TARGET/.snapshots"
   mount -o "$opts,subvol=@var_log"   "$ROOT_DEV" "$TARGET/var/log"
   mount -o "$opts,subvol=@pkg"       "$ROOT_DEV" "$TARGET/var/cache/pacman/pkg"
-  mount "$ESP_DEV" "$TARGET/efi"
+  mount -o umask=0077 "$ESP_DEV" "$TARGET/boot"
   chmod 750 "$TARGET/.snapshots"
 }
 
@@ -232,35 +232,34 @@ EOF
   # initramfs: portable virtual drivers; the bootstrap runs mkinitcpio -P later
   install -Dm644 "$ARCHCLOUD_TEMPLATES/mkinitcpio-archcloud.conf" "$TARGET/etc/mkinitcpio.conf.d/archcloud.conf"
 
-  # bootloader: hybrid GRUB
-  install -Dm644 "$ARCHCLOUD_TEMPLATES/default-grub" "$TARGET/etc/default/grub"
-  log "Installing GRUB for BIOS and UEFI"
-  arch-chroot "$TARGET" grub-install --target=i386-pc --recheck "$TARGET_DISK" >/dev/null
-  arch-chroot "$TARGET" grub-install --target=x86_64-efi --efi-directory=/efi \
-    --bootloader-id=archcloud --removable --recheck >/dev/null
-  if [[ "$(firmware)" == UEFI ]]; then
-    arch-chroot "$TARGET" grub-install --target=x86_64-efi --efi-directory=/efi \
-      --bootloader-id=archcloud --recheck >/dev/null || warn "could not register a UEFI boot entry (removable path still boots)"
-  fi
+  # bootloader: Limine for BIOS + UEFI. Kernels and initramfs live on the FAT
+  # ESP at /boot (Limine cannot read btrfs). limine-update writes limine.conf,
+  # deploys BOOTX64.EFI to the removable path and installs the BIOS boot sector
+  # into the bios-boot partition (#1).
+  log "Installing Limine for BIOS and UEFI"
+  install -Dm755 "$ARCHCLOUD_TEMPLATES/limine-update" "$TARGET/usr/local/sbin/limine-update"
+  install -Dm644 "$ARCHCLOUD_TEMPLATES/95-limine-update.hook" "$TARGET/etc/pacman.d/hooks/95-limine-update.hook"
+  install -Dm644 "$ARCHCLOUD_TEMPLATES/limine-update.conf" "$TARGET/etc/default/limine-update"
+  printf '%s 1\n' "$TARGET_DISK" > "$TARGET/etc/limine-bios-install"
+  arch-chroot "$TARGET" mkinitcpio -P >/dev/null 2>&1 || warn "mkinitcpio -P reported errors"
+  arch-chroot "$TARGET" /usr/local/sbin/limine-update --bios
 
   arch-chroot "$TARGET" passwd -l root >/dev/null
 }
 
 #--- never leave an unbootable disk -------------------------------------------------------
-# The bootstrap's grub_default step normally writes grub.cfg and pins the CachyOS
-# kernel. If the bootstrap aborted before that, generate the config here, and fail
-# the installation loudly when the kernel, initramfs or grub.cfg are still missing.
+# configure_target already installed Limine; the bootstrap may have changed the
+# kernel set since. Refresh the entries, then fail the installation loudly when
+# anything Limine needs is missing.
 ensure_bootable() {
-  if [[ ! -s "$TARGET/boot/grub/grub.cfg" ]]; then
-    warn "grub.cfg missing after the bootstrap — generating it now"
-    arch-chroot "$TARGET" mkinitcpio -P >/dev/null 2>&1 || warn "mkinitcpio -P reported errors"
-    arch-chroot "$TARGET" grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 || true
-  fi
+  [[ -s "$TARGET/boot/limine/limine.conf" ]] || warn "limine.conf missing after the bootstrap — regenerating"
+  arch-chroot "$TARGET" /usr/local/sbin/limine-update --bios || warn "limine-update failed"
   local f
-  for f in boot/vmlinuz-linux-cachyos-server boot/initramfs-linux-cachyos-server.img boot/grub/grub.cfg efi/EFI/BOOT/BOOTX64.EFI; do
+  for f in boot/vmlinuz-linux-cachyos-server boot/initramfs-linux-cachyos-server.img \
+           boot/limine/limine.conf boot/limine/limine-bios.sys boot/EFI/BOOT/BOOTX64.EFI; do
     [[ -s "$TARGET/$f" ]] || die "target is not bootable: /$f is missing"
   done
-  grep -q 'linux-cachyos-server' "$TARGET/boot/grub/grub.cfg" || die "target is not bootable: grub.cfg has no cachyos-server entry"
+  grep -q 'vmlinuz-linux-cachyos-server' "$TARGET/boot/limine/limine.conf" || die "target is not bootable: limine.conf has no cachyos-server entry"
 }
 
 #--- bootstrap in chroot ---------------------------------------------------------------

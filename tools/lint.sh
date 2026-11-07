@@ -12,6 +12,7 @@ BASH_SCRIPTS=(
   "$AIROOTFS"/usr/local/bin/choose-mirror
   "$AIROOTFS"/usr/local/lib/archcloud/lib.sh
   "$AIROOTFS"/usr/local/lib/archcloud/arch-server-bootstrap.sh
+  "$AIROOTFS"/usr/local/lib/archcloud/templates/limine-update
   "$AIROOTFS"/usr/local/lib/archcloud/templates/login-status
   "$AIROOTFS"/usr/local/lib/archcloud/templates/login-status-collect
   "$AIROOTFS"/root/.automated_script.sh
